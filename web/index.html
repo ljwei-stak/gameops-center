@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GameOps Center</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script defer src="https://unpkg.com/lucide@latest"></script>
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">GO</div>
+          <div>
+            <p>GameOps</p>
+            <strong>运维控制台</strong>
+          </div>
+        </div>
+        <nav class="nav-list" aria-label="主导航">
+          <a href="#overview" class="nav-item active">
+            <i data-lucide="activity"></i>
+            <span>总览</span>
+          </a>
+          <a href="#fleet" class="nav-item">
+            <i data-lucide="server"></i>
+            <span>区服</span>
+          </a>
+          <a href="#release" class="nav-item">
+            <i data-lucide="rocket"></i>
+            <span>发布</span>
+          </a>
+          <a href="#logs" class="nav-item">
+            <i data-lucide="scroll-text"></i>
+            <span>日志</span>
+          </a>
+        </nav>
+        <div class="sidebar-footer">
+          <span class="status-dot"></span>
+          <span>Live API</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar" id="overview">
+          <div>
+            <p class="eyebrow">GameOps Center</p>
+            <h1>游戏服务器运维控制台</h1>
+          </div>
+          <div class="top-actions">
+            <span class="clock" id="clock">--:--:--</span>
+            <label class="toggle">
+              <input id="autoRefresh" type="checkbox" checked />
+              <span>自动刷新</span>
+            </label>
+            <button class="button primary" id="refreshBtn" title="刷新数据">
+              <i data-lucide="refresh-cw"></i>
+              <span>刷新</span>
+            </button>
+          </div>
+        </header>
+
+        <section class="metrics-grid" id="metricsGrid" aria-label="核心指标"></section>
+
+        <section class="main-grid">
+          <section class="panel span-12" id="fleet">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Fleet</p>
+                <h2>游戏区服状态</h2>
+              </div>
+              <div class="filter-row">
+                <div class="segmented" id="regionFilters"></div>
+                <select id="statusFilter" aria-label="状态筛选">
+                  <option value="all">全部状态</option>
+                  <option value="running">运行中</option>
+                  <option value="degraded">降级</option>
+                  <option value="maintenance">维护</option>
+                </select>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>服务器</th>
+                    <th>模式</th>
+                    <th>玩家</th>
+                    <th>CPU</th>
+                    <th>内存</th>
+                    <th>P95</th>
+                    <th>版本</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="serverRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel span-4">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Regions</p>
+                <h2>流量权重</h2>
+              </div>
+            </div>
+            <div class="region-stack" id="regionCards"></div>
+          </section>
+
+          <section class="panel span-5">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Trend</p>
+                <h2>在线与延迟</h2>
+              </div>
+            </div>
+            <canvas id="trendCanvas" width="720" height="240" aria-label="在线玩家和延迟趋势"></canvas>
+          </section>
+
+          <section class="panel span-3" id="release">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Release</p>
+                <h2>发布编排</h2>
+              </div>
+            </div>
+            <form class="deploy-form" id="deployForm">
+              <label>
+                <span>目标战区</span>
+                <select id="deployRegion"></select>
+              </label>
+              <label>
+                <span>发布策略</span>
+                <select id="deployStrategy">
+                  <option value="canary">金丝雀</option>
+                  <option value="rolling">滚动发布</option>
+                  <option value="hotfix">故障热修</option>
+                </select>
+              </label>
+              <label>
+                <span>版本号</span>
+                <input id="deployVersion" value="v1.9.0" autocomplete="off" />
+              </label>
+              <label>
+                <span>操作人</span>
+                <input id="operator" value="ops-admin" autocomplete="off" />
+              </label>
+              <button class="button primary full" type="submit" title="执行发布">
+                <i data-lucide="rocket"></i>
+                <span>执行发布</span>
+              </button>
+            </form>
+          </section>
+
+          <section class="panel span-4">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Alerts</p>
+                <h2>实时告警</h2>
+              </div>
+            </div>
+            <div class="alert-list" id="alertList"></div>
+          </section>
+
+          <section class="panel span-4">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Deployments</p>
+                <h2>发布记录</h2>
+              </div>
+            </div>
+            <div class="deployment-list" id="deploymentList"></div>
+          </section>
+
+          <section class="panel span-8" id="logs">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Logs</p>
+                <h2>操作与系统日志</h2>
+              </div>
+              <select id="logFilter" aria-label="日志级别">
+                <option value="ALL">全部级别</option>
+                <option value="INFO">INFO</option>
+                <option value="WARN">WARN</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+            </div>
+            <div class="log-console" id="logConsole"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

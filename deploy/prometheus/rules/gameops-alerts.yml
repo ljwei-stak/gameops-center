@@ -1,0 +1,107 @@
+groups:
+  - name: gameops.rules
+    rules:
+      - alert: GameOpsCenterTargetDown
+        expr: up{job="gameops-center"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          region: platform
+        annotations:
+          summary: "GameOps Center 采集目标不可达"
+          description: "Prometheus 已经 1 分钟无法抓取 GameOps Center /metrics。"
+          runbook: "检查 gameops-center 容器、MySQL 连接和应用启动日志。"
+
+      - alert: GameOpsHighHostCPU
+        expr: gameops_host_cpu_percent > 80
+        for: 2m
+        labels:
+          severity: warning
+          region: platform
+        annotations:
+          summary: "宿主机 CPU 使用率过高"
+          description: "CPU 当前为 {{ $value | humanize }}%，持续超过 80%。"
+          runbook: "检查后台任务、容器资源限制和扩容计划。"
+
+      - alert: GameOpsHighHostMemory
+        expr: gameops_host_memory_percent > 85
+        for: 2m
+        labels:
+          severity: warning
+          region: platform
+        annotations:
+          summary: "宿主机内存水位过高"
+          description: "内存当前为 {{ $value | humanize }}%，持续超过 85%。"
+          runbook: "检查进程内存、缓存、OOM 风险和 MySQL/Grafana 资源占用。"
+
+      - alert: GameOpsHighDiskUsage
+        expr: gameops_host_disk_percent > 82
+        for: 5m
+        labels:
+          severity: warning
+          region: platform
+        annotations:
+          summary: "宿主机磁盘使用率过高"
+          description: "磁盘使用率当前为 {{ $value | humanize }}%，持续超过 82%。"
+          runbook: "清理日志归档、镜像缓存、构建产物和 Prometheus 保留周期。"
+
+      - alert: GameOpsWorkloadCPUHigh
+        expr: gameops_workload_cpu_percent > 75
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "区服工作负载 CPU 压力过高"
+          description: "{{ $labels.workload_id }} CPU 当前为 {{ $value | humanize }}%，持续超过 75%。"
+          runbook: "优先扩容 Deployment，观察 P95 延迟和入口流量权重。"
+
+      - alert: GameOpsWorkloadMemoryHigh
+        expr: gameops_workload_memory_percent > 82
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "区服工作负载内存水位过高"
+          description: "{{ $labels.workload_id }} 内存当前为 {{ $value | humanize }}%，持续超过 82%。"
+          runbook: "检查房间对象、会话缓存和最近发布版本，必要时滚动重启。"
+
+      - alert: GameOpsWorkloadLatencyHigh
+        expr: gameops_workload_latency_p95_ms > 130
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "区服 P95 延迟过高"
+          description: "{{ $labels.workload_id }} P95 延迟当前为 {{ $value | humanize }} ms，持续超过 130 ms。"
+          runbook: "检查跨区链路、战斗同步耗时、Pod 负载和网关转发。"
+
+      - alert: GameOpsWorkloadDownOrDegraded
+        expr: gameops_workload_status < 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "区服工作负载不可用或处于降级状态"
+          description: "{{ $labels.workload_id }} 状态值为 {{ $value | humanize }}，需要立即确认。"
+          runbook: "查看 Deployment rollout、Pod 事件、最近发布记录和容器日志。"
+
+      - alert: GameOpsCapacityNearLimit
+        expr: sum by (workload_id, region, namespace, deployment, service) (gameops_workload_players) / clamp_min(sum by (workload_id, region, namespace, deployment, service) (gameops_workload_capacity), 1) > 0.92
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "区服玩家容量接近上限"
+          description: "{{ $labels.workload_id }} 容量使用率已经超过 92%。"
+          runbook: "扩容 Deployment，并根据流量权重把新容量纳入入口调度。"
+
+      - alert: GameOpsActiveCriticalAlerts
+        expr: gameops_alerts_active{severity="critical"} > 0
+        for: 1m
+        labels:
+          severity: critical
+          region: platform
+        annotations:
+          summary: "GameOps 内部存在 critical 告警"
+          description: "GameOps 当前记录了 {{ $value | humanize }} 条 critical 级别告警。"
+          runbook: "进入 GameOps Center 告警页查看详情，并由 Alertmanager 路由通知责任人。"

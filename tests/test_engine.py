@@ -287,6 +287,36 @@ class GameOpsEngineTest(unittest.TestCase):
         self.assertIn("gameops_workload_cpu_percent", metrics)
         self.assertIn("gameops_deployments_total", metrics)
 
+    def test_alertmanager_webhook_is_logged_and_forwarded(self):
+        result = self.engine.receive_alertmanager(
+            {
+                "receiver": "gameops-center",
+                "status": "firing",
+                "alerts": [
+                    {
+                        "status": "firing",
+                        "labels": {
+                            "alertname": "GameOpsHighHostCPU",
+                            "severity": "warning",
+                            "region": "platform",
+                        },
+                        "annotations": {
+                            "summary": "Host CPU high",
+                            "description": "CPU has stayed above 80 percent.",
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["received"], 1)
+        self.assertEqual(result["firing"], 1)
+        self.assertTrue(result["notifications"][0]["ok"])
+        latest_log = self.engine.list_logs(limit=1)[0]
+        self.assertEqual(latest_log["source"], "alertmanager")
+        self.assertIn("GameOpsHighHostCPU", latest_log["message"])
+
     def test_ai_report_has_summary(self):
         report = self.engine.report()
 

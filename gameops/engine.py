@@ -344,6 +344,45 @@ class GameOpsEngine:
         self.store.insert_log("INFO", "notifier", f"{operator} 推送告警汇总，渠道 {len(results)} 个", actor=operator)
         return results
 
+    def receive_alertmanager(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValidationError("Alertmanager payload must be a JSON object")
+        alerts = payload.get("alerts", [])
+        if alerts is None:
+            alerts = []
+        if not isinstance(alerts, list):
+            raise ValidationError("Alertmanager alerts must be a list")
+
+        with self._lock:
+            summary = _summarize_alertmanager_payload(payload, alerts)
+            notification_results = self.notifications.notify_event(
+                summary["title"],
+                summary["body"],
+                {
+                    "receiver": payload.get("receiver"),
+                    "status": payload.get("status"),
+                    "group_labels": payload.get("groupLabels", {}),
+                    "common_labels": payload.get("commonLabels", {}),
+                    "alerts": alerts[:20],
+                },
+            )
+            self.store.insert_log(
+                summary["level"],
+                "alertmanager",
+                summary["message"],
+                summary["region"],
+                summary["workload_id"],
+                "alertmanager",
+            )
+            return {
+                "status": "accepted",
+                "received": summary["received"],
+                "firing": summary["firing"],
+                "resolved": summary["resolved"],
+                "severities": summary["severities"],
+                "notifications": notification_results,
+            }
+
     def diagnose(self) -> dict[str, Any]:
         alerts = self.alerts()
         workloads = self.store.list_workloads()
@@ -612,6 +651,76 @@ def _host_alerts(host: dict[str, Any]) -> list[dict[str, Any]]:
         if severity:
             alerts.append(_alert(f"platform-{metric}", severity, title, pseudo, metric, value, threshold, runbook))
     return alerts
+
+
+def _summarize_alertmanager_payload(payload: dict[str, Any], alerts: list[Any]) -> dict[str, Any]:
+    received = len(alerts)
+    firing = 0
+    resolved = 0
+    severities: dict[str, int] = {}
+    regions = set()
+    workload_ids = set()
+    alert_names = []
+    lines = []
+
+    for item in alerts:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or payload.get("status") or "unknown")
+        if status == "resolved":
+            resolved += 1
+        elif status == "firing":
+            firing += 1
+        labels = item.get("labels") if isinstance(item.get("labels"), dict) else {}
+        annotations = item.get("annotations") if isinstance(item.get("annotations"), dict) else {}
+        severity = str(labels.get("severity") or "unknown")
+        severities[severity] = severities.get(severity, 0) + 1
+        region = str(labels.get("region") or labels.get("namespace") or "")
+        workload_id = str(labels.get("workload_id") or "")
+        alert_name = str(labels.get("alertname") or annotations.get("summary") or "unknown")
+        if region:
+            regions.add(region)
+        if workload_id:
+            workload_ids.add(workload_id)
+        if alert_name not in alert_names:
+            alert_names.append(alert_name)
+        if len(lines) < 8:
+            description = annotations.get("description") or annotations.get("summary") or ""
+            target = workload_id or region or labels.get("deployment") or "platform"
+            lines.append(f"[{status}/{severity}] {alert_name} {target} {description}".strip())
+
+    overall_status = str(payload.get("status") or ("firing" if firing else "resolved" if resolved else "unknown"))
+    if firing and severities.get("critical", 0):
+        level = "ERROR"
+    elif firing:
+        level = "WARN"
+    else:
+        level = "INFO"
+
+    receiver = payload.get("receiver") or "default"
+    region = next(iter(regions)) if len(regions) == 1 else None
+    workload_id = next(iter(workload_ids)) if len(workload_ids) == 1 else None
+    names = ", ".join(alert_names[:5]) or "no alert items"
+    title = f"GameOps Alertmanager {overall_status}: {received} alerts"
+    body = "\n".join(lines) or "Alertmanager webhook delivered without alert items."
+    if len(alerts) > len(lines):
+        body = f"{body}\n... and {len(alerts) - len(lines)} more alerts"
+    message = (
+        f"Alertmanager receiver={receiver} status={overall_status} "
+        f"received={received} firing={firing} resolved={resolved} alerts={names}"
+    )
+    return {
+        "title": title,
+        "body": body,
+        "message": message,
+        "level": level,
+        "received": received,
+        "firing": firing,
+        "resolved": resolved,
+        "severities": severities,
+        "region": region,
+        "workload_id": workload_id,
+    }
 
 
 def _avg(values: Any) -> float:

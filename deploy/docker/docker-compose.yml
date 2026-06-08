@@ -39,6 +39,12 @@ services:
       GAMEOPS_WEBHOOK_URL: ${GAMEOPS_WEBHOOK_URL:-}
       GAMEOPS_WECOM_WEBHOOK: ${GAMEOPS_WECOM_WEBHOOK:-}
       GAMEOPS_DINGTALK_WEBHOOK: ${GAMEOPS_DINGTALK_WEBHOOK:-}
+      GAMEOPS_SMTP_HOST: ${GAMEOPS_SMTP_HOST:-}
+      GAMEOPS_SMTP_PORT: ${GAMEOPS_SMTP_PORT:-25}
+      GAMEOPS_SMTP_USER: ${GAMEOPS_SMTP_USER:-}
+      GAMEOPS_SMTP_PASSWORD: ${GAMEOPS_SMTP_PASSWORD:-}
+      GAMEOPS_MAIL_FROM: ${GAMEOPS_MAIL_FROM:-}
+      GAMEOPS_MAIL_TO: ${GAMEOPS_MAIL_TO:-}
       GAMEOPS_LLM_API_KEY: ${GAMEOPS_LLM_API_KEY:-}
       GAMEOPS_LLM_API_BASE: ${GAMEOPS_LLM_API_BASE:-https://api.openai.com/v1}
       GAMEOPS_LLM_MODEL: ${GAMEOPS_LLM_MODEL:-gpt-4.1-mini}
@@ -46,5 +52,59 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${HOME:-~}/.kube:/home/gameops/.kube:ro
 
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: gameops-prometheus
+    depends_on:
+      - gameops-center
+      - alertmanager
+    ports:
+      - "${GAMEOPS_PROMETHEUS_PORT:-9090}:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${GAMEOPS_PROMETHEUS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus/rules:/etc/prometheus/rules:ro
+      - gameops-prometheus-data:/prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: gameops-alertmanager
+    depends_on:
+      - gameops-center
+    ports:
+      - "${GAMEOPS_ALERTMANAGER_PORT:-9093}:9093"
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ../alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - gameops-alertmanager-data:/alertmanager
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: gameops-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "${GAMEOPS_GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GAMEOPS_GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GAMEOPS_GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/gameops-overview.json
+    volumes:
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/etc/grafana/dashboards:ro
+      - gameops-grafana-data:/var/lib/grafana
+
 volumes:
   gameops-mysql-data:
+  gameops-prometheus-data:
+  gameops-alertmanager-data:
+  gameops-grafana-data:

@@ -112,6 +112,27 @@ deploy/prometheus/prometheus.yml
 - `gameops_alerts_active`
 - `gameops_deployments_total`
 
+## Prometheus / Grafana / Alertmanager
+
+Docker Compose 会同时启动长期监控、仪表盘和告警路由：
+
+| 服务 | 地址 | 说明 |
+| --- | --- | --- |
+| GameOps Center | `http://127.0.0.1:8018` | 运维控制台与 `/metrics` |
+| Prometheus | `http://127.0.0.1:9090` | 抓取指标、保留时序数据、执行告警规则 |
+| Grafana | `http://127.0.0.1:3000` | 默认账号 `admin/admin`，自动加载 GameOps Overview 仪表盘 |
+| Alertmanager | `http://127.0.0.1:9093` | 告警分组、抑制、重复发送和 Webhook 路由 |
+
+Prometheus 配置位于 `deploy/prometheus/prometheus.yml`，告警规则位于 `deploy/prometheus/rules/gameops-alerts.yml`。默认保留 15 天指标数据，可通过环境变量调整：
+
+```powershell
+$env:GAMEOPS_PROMETHEUS_RETENTION="30d"
+```
+
+Alertmanager 配置位于 `deploy/alertmanager/alertmanager.yml`。它会把 firing/resolved 告警发送到 `gameops-center` 的 `/api/alertmanager`，由 GameOps 写入 MySQL 日志并复用 `GAMEOPS_WEBHOOK_URL`、`GAMEOPS_WECOM_WEBHOOK`、`GAMEOPS_DINGTALK_WEBHOOK`、`GAMEOPS_SMTP_*` 等通知渠道继续分发。
+
+Grafana provisioning 位于 `deploy/grafana/provisioning`，仪表盘 JSON 位于 `deploy/grafana/dashboards/gameops-overview.json`。首次启动后无需手动创建数据源或导入仪表盘。
+
 ## Docker 部署
 
 ```powershell
@@ -122,6 +143,9 @@ Compose 会启动：
 
 - `gameops-mysql`：MySQL 8，数据卷 `gameops-mysql-data`
 - `gameops-center`：运维平台，连接 `mysql:3306`
+- `gameops-prometheus`：长期指标、告警规则和 Alertmanager 对接
+- `gameops-grafana`：自动装载 Prometheus 数据源和 GameOps Overview 仪表盘
+- `gameops-alertmanager`：告警分组、抑制、重复通知和路由
 
 容器 MySQL 默认映射到宿主机 `3307`，避免和本机 MySQL 的 `3306` 冲突。需要改宿主机端口时设置：
 
@@ -256,7 +280,11 @@ gameops-center/
   deploy/
     docker/docker-compose.yml
     kubernetes/*.yaml
+    alertmanager/alertmanager.yml
+    grafana/dashboards/*.json
+    grafana/provisioning/**/*.yml
     prometheus/prometheus.yml
+    prometheus/rules/*.yml
   infrastructure/terraform/main.tf
   ops/ansible/*.yml
   tests/

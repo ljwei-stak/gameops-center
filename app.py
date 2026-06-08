@@ -100,6 +100,10 @@ class GameOpsHandler(BaseHTTPRequestHandler):
                 self._json(ENGINE.login(payload.get("username", ""), payload.get("password", "")))
                 return
 
+            if path == "/api/alertmanager":
+                self._json(ENGINE.receive_alertmanager(payload), HTTPStatus.ACCEPTED)
+                return
+
             if path == "/api/logout":
                 token = self._bearer_token()
                 if token:

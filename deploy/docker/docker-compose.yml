@@ -66,6 +66,7 @@ services:
       GAMEOPS_LLM_API_KEY: ${GAMEOPS_LLM_API_KEY:-}
       GAMEOPS_LLM_API_BASE: ${GAMEOPS_LLM_API_BASE:-https://api.openai.com/v1}
       GAMEOPS_LLM_MODEL: ${GAMEOPS_LLM_MODEL:-gpt-4.1-mini}
+      GAMEOPS_LLM_USER_AGENT: ${GAMEOPS_LLM_USER_AGENT:-GameOps-Center/1.0}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${HOME:-~}/.kube:/home/gameops/.kube:ro

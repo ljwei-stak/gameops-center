@@ -224,6 +224,7 @@ $env:GAMEOPS_MAIL_TO="sre@example.com,release@example.com"
 $env:GAMEOPS_LLM_API_KEY="sk-..."
 $env:GAMEOPS_LLM_API_BASE="https://api.openai.com/v1"
 $env:GAMEOPS_LLM_MODEL="gpt-4.1-mini"
+$env:GAMEOPS_LLM_USER_AGENT="GameOps-Center/1.0"
 ```
 
 没有密钥也可以运行，系统会用内置规则生成诊断和报告。

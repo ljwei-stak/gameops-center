@@ -15,6 +15,7 @@ class AIOpsAssistant:
         self.api_key = os.environ.get("GAMEOPS_LLM_API_KEY", "")
         self.api_base = os.environ.get("GAMEOPS_LLM_API_BASE", "https://api.openai.com/v1")
         self.model = os.environ.get("GAMEOPS_LLM_MODEL", "gpt-4.1-mini")
+        self.user_agent = os.environ.get("GAMEOPS_LLM_USER_AGENT", "GameOps-Center/1.0")
 
     def diagnose(self, alerts: list[dict[str, Any]], workloads: list[dict[str, Any]]) -> dict[str, Any]:
         if self.api_key:
@@ -127,7 +128,9 @@ class AIOpsAssistant:
             method="POST",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
                 "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": self.user_agent,
             },
         )
         try:

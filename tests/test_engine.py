@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import json
 import os
 import unittest
+from unittest.mock import patch
 
 from gameops.adapters import CompositeAdapter
 from gameops.ai_ops import AIOpsAssistant
@@ -471,6 +472,51 @@ class GameOpsEngineTest(unittest.TestCase):
 
         self.assertIn("summary", report)
         self.assertIn("next_actions", report)
+
+    def test_ai_chat_sends_gateway_friendly_headers(self):
+        previous_key = os.environ.get("GAMEOPS_LLM_API_KEY")
+        previous_base = os.environ.get("GAMEOPS_LLM_API_BASE")
+        previous_model = os.environ.get("GAMEOPS_LLM_MODEL")
+        previous_user_agent = os.environ.get("GAMEOPS_LLM_USER_AGENT")
+        os.environ["GAMEOPS_LLM_API_KEY"] = "test-key"
+        os.environ["GAMEOPS_LLM_API_BASE"] = "https://llm.example/v1"
+        os.environ["GAMEOPS_LLM_MODEL"] = "gpt-test"
+        os.environ["GAMEOPS_LLM_USER_AGENT"] = "GameOps-Test/1.0"
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"pong"}}]}'
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["headers"] = dict(req.headers)
+            captured["timeout"] = timeout
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse()
+
+        try:
+            with patch("gameops.ai_ops.request.urlopen", fake_urlopen):
+                result = AIOpsAssistant()._chat("system", {"task": "ping"})
+        finally:
+            _restore_env("GAMEOPS_LLM_API_KEY", previous_key)
+            _restore_env("GAMEOPS_LLM_API_BASE", previous_base)
+            _restore_env("GAMEOPS_LLM_MODEL", previous_model)
+            _restore_env("GAMEOPS_LLM_USER_AGENT", previous_user_agent)
+
+        self.assertEqual(result, "pong")
+        self.assertEqual(captured["url"], "https://llm.example/v1/chat/completions")
+        self.assertEqual(captured["headers"]["Accept"], "application/json")
+        self.assertEqual(captured["headers"]["Content-type"], "application/json; charset=utf-8")
+        self.assertEqual(captured["headers"]["User-agent"], "GameOps-Test/1.0")
+        self.assertEqual(captured["body"]["model"], "gpt-test")
+        self.assertEqual(captured["timeout"], 20)
 
     def test_password_hash_helpers_still_work_for_mysql_store(self):
         salt, password_hash = hash_password("secret")

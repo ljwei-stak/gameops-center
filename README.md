@@ -71,6 +71,7 @@ flowchart LR
 | 组件 | 版本建议 | 用途 |
 | --- | --- | --- |
 | Docker Desktop | 当前稳定版 | 运行 MySQL、GameOps、Prometheus、Grafana、Alertmanager |
+| Docker Engine | 24+ | Linux 服务器运行 Compose 栈 |
 | Python | 3.12+ | 本地开发、测试、迁移 |
 | MySQL | 8.0+ / 8.4 | 持久化数据，Compose 默认使用 `mysql:8.4` |
 | Node.js | 18+ | 可选，用于检查前端 JS 语法 |
@@ -131,6 +132,310 @@ docker compose -f deploy/docker/docker-compose.yml down
 ```powershell
 docker compose -f deploy/docker/docker-compose.yml down -v
 ```
+
+## Linux / WSL 部署与使用
+
+Linux 下推荐优先使用 Docker Compose 完整栈部署；如果你要把 GameOps 作为普通 Python 服务运行，也可以使用系统 MySQL 或托管 MySQL。WSL 场景则通常复用 Windows 上的 Docker Desktop。
+
+### Linux 服务器 Docker Compose 部署
+
+以下命令以 Ubuntu / Debian 为例。生产服务器建议创建独立用户运行项目，例如 `gameops`。
+
+安装基础工具：
+
+```bash
+sudo apt update
+sudo apt install -y git curl ca-certificates
+```
+
+安装 Docker Engine 和 Compose plugin。若服务器已经安装 Docker，可跳过这一段：
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+. /etc/os-release
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  ${VERSION_CODENAME} stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+允许当前用户直接运行 Docker：
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker version
+docker compose version
+```
+
+拉取项目并启动完整栈：
+
+```bash
+git clone https://github.com/ljwei-stak/gameops-center.git
+cd gameops-center
+docker compose -f deploy/docker/docker-compose.yml up -d --build
+```
+
+查看运行状态：
+
+```bash
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+curl -s http://127.0.0.1:8018/api/health
+curl -s http://127.0.0.1:8018/metrics | grep gameops_mysql_pool_idle
+```
+
+服务器防火墙只开放你需要的入口。最小本地验证通常只需要 SSH；如果要从外部访问 Web UI 和 Grafana，再按需开放：
+
+| 端口 | 服务 | 建议 |
+| --- | --- | --- |
+| `8018` | GameOps Center | 建议放在反向代理后，并启用 HTTPS |
+| `3000` | Grafana | 生产环境必须修改默认密码 |
+| `9090` | Prometheus | 不建议直接暴露公网 |
+| `9093` | Alertmanager | 不建议直接暴露公网 |
+| `3307` | MySQL 映射端口 | 生产环境不要暴露公网 |
+
+常用运维命令：
+
+```bash
+docker compose -f deploy/docker/docker-compose.yml logs -f gameops-center
+docker compose -f deploy/docker/docker-compose.yml restart gameops-center
+docker compose -f deploy/docker/docker-compose.yml pull
+docker compose -f deploy/docker/docker-compose.yml up -d --build
+docker compose -f deploy/docker/docker-compose.yml down
+```
+
+升级代码并重启：
+
+```bash
+git pull
+docker compose -f deploy/docker/docker-compose.yml run --rm gameops-center \
+  sh -lc "cd /app && alembic -c migrations/alembic.ini upgrade head"
+docker compose -f deploy/docker/docker-compose.yml up -d --build
+```
+
+### Linux 原生 Python 服务部署
+
+如果不想把应用本体放进容器，可以用 Linux 原生 Python 跑 GameOps，数据库使用本机 MySQL 或托管 MySQL。
+
+安装依赖：
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pip python3-venv git mysql-client
+```
+
+创建虚拟环境：
+
+```bash
+git clone https://github.com/ljwei-stak/gameops-center.git
+cd gameops-center
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+配置环境变量：
+
+```bash
+export GAMEOPS_MYSQL_HOST="127.0.0.1"
+export GAMEOPS_MYSQL_PORT="3306"
+export GAMEOPS_MYSQL_DATABASE="gameops"
+export GAMEOPS_MYSQL_USER="gameops"
+export GAMEOPS_MYSQL_PASSWORD="gameops-pass"
+export GAMEOPS_HOST="0.0.0.0"
+export GAMEOPS_RUNTIME="auto"
+export GAMEOPS_DRY_RUN="true"
+export GAMEOPS_TRUSTED_RUNTIME="false"
+```
+
+初始化数据库：
+
+```bash
+mysql -h "$GAMEOPS_MYSQL_HOST" -P "$GAMEOPS_MYSQL_PORT" -uroot -p <<'SQL'
+CREATE DATABASE IF NOT EXISTS gameops CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS 'gameops'@'%' IDENTIFIED BY 'gameops-pass';
+GRANT ALL PRIVILEGES ON gameops.* TO 'gameops'@'%';
+FLUSH PRIVILEGES;
+SQL
+
+alembic -c migrations/alembic.ini upgrade head
+```
+
+启动应用：
+
+```bash
+python app.py 8018
+```
+
+用 systemd 托管服务。先创建环境文件：
+
+```bash
+sudo tee /etc/gameops-center.env >/dev/null <<'EOF'
+GAMEOPS_MYSQL_HOST=127.0.0.1
+GAMEOPS_MYSQL_PORT=3306
+GAMEOPS_MYSQL_DATABASE=gameops
+GAMEOPS_MYSQL_USER=gameops
+GAMEOPS_MYSQL_PASSWORD=gameops-pass
+GAMEOPS_HOST=0.0.0.0
+GAMEOPS_RUNTIME=auto
+GAMEOPS_DRY_RUN=true
+GAMEOPS_TRUSTED_RUNTIME=false
+GAMEOPS_LOCAL_LOGIN_ENABLED=true
+EOF
+```
+
+再创建 systemd unit，注意把 `User` 和路径改成你的实际部署用户和目录：
+
+```bash
+sudo tee /etc/systemd/system/gameops-center.service >/dev/null <<'EOF'
+[Unit]
+Description=GameOps Center
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gameops
+WorkingDirectory=/opt/gameops-center
+EnvironmentFile=/etc/gameops-center.env
+ExecStart=/opt/gameops-center/.venv/bin/python /opt/gameops-center/app.py 8018
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now gameops-center
+sudo systemctl status gameops-center
+```
+
+查看日志：
+
+```bash
+journalctl -u gameops-center -f
+```
+
+### WSL + Docker Desktop 使用
+
+WSL 适合本机开发和测试。推荐做法是：代码放在 Windows 工作区或 WSL home 均可，容器由 Windows 的 Docker Desktop 承载，WSL 里通过 Docker Desktop WSL Integration 或 Windows interop 调用同一套 Docker 后端。
+
+在 Docker Desktop 图形界面中启用 Ubuntu integration：
+
+```text
+Docker Desktop -> Settings -> Resources -> WSL Integration -> Enable integration with Ubuntu
+```
+
+重新打开 Ubuntu 终端后验证：
+
+```bash
+docker --version
+docker compose version
+docker desktop status
+```
+
+Docker Desktop 4.37+ 提供 `docker desktop` 子命令，可以从 WSL 里管理 Docker Desktop 应用本身：
+
+```bash
+docker desktop start
+docker desktop stop
+docker desktop restart
+docker desktop status
+docker desktop version
+```
+
+如果 WSL Integration 还没有注入 `docker` 命令，但 WSL interop 已开启，也可以直接调用 Windows 端可执行文件：
+
+```bash
+docker.exe desktop status
+docker.exe desktop start
+docker.exe ps
+docker.exe compose version
+```
+
+或者使用完整路径：
+
+```bash
+"/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe" desktop status
+"/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe" compose version
+"/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe" &
+```
+
+在 WSL 中进入当前 Windows 工作区：
+
+```bash
+cd /mnt/e/program_file/Shell_project/gameops-center
+```
+
+安装 Python 测试环境：
+
+```bash
+sudo apt update
+sudo apt install -y python3-pip python3-venv
+python3 -m venv ~/.venvs/gameops-center
+. ~/.venvs/gameops-center/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+启动 Compose 栈：
+
+```bash
+docker compose -f deploy/docker/docker-compose.yml up -d --build
+```
+
+如果使用 `docker.exe`，命令等价：
+
+```bash
+docker.exe compose -f deploy/docker/docker-compose.yml up -d --build
+```
+
+WSL 中验证服务：
+
+```bash
+curl -s http://127.0.0.1:8018/api/health
+curl -s http://127.0.0.1:8018/metrics | grep gameops_workload_cpu_percent
+curl -s http://127.0.0.1:9090/api/v1/targets
+curl -s http://127.0.0.1:3000/api/health
+curl -s http://127.0.0.1:9093/-/ready
+```
+
+WSL 中运行测试：
+
+```bash
+. ~/.venvs/gameops-center/bin/activate
+python -m unittest discover -s tests
+```
+
+启用 MySQL 集成测试：
+
+```bash
+export GAMEOPS_TEST_MYSQL=1
+export GAMEOPS_MYSQL_HOST=127.0.0.1
+export GAMEOPS_MYSQL_PORT=3307
+export GAMEOPS_MYSQL_USER=gameops
+export GAMEOPS_MYSQL_PASSWORD=gameops-pass
+export GAMEOPS_MYSQL_ROOT_USER=root
+export GAMEOPS_MYSQL_ROOT_PASSWORD=root-pass
+python -m unittest discover -s tests
+```
+
+WSL 中常见注意事项：
+
+- 如果 `docker` 提示没有 WSL Integration，先确认 Docker Desktop UI 中 Ubuntu integration 已开启。
+- 如果 `docker desktop status` 可用但 `docker` 不可用，可以临时用 `docker.exe`。
+- 如果 Ubuntu 终端启动异常，可执行 `wsl --terminate Ubuntu` 后重新打开。
+- Windows 路径在 WSL 中通常映射为 `/mnt/c`、`/mnt/d`、`/mnt/e`。
+- 在 `/mnt/*` 下运行 Git 时，可能出现换行符或 filemode 差异；提交前建议以 Windows Git 或统一的 Git 配置确认状态。
 
 ## 本地开发运行
 

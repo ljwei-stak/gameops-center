@@ -1,3 +1,4 @@
+.git
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -9,4 +10,3 @@ build/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
-!data/.gitkeep

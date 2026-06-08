@@ -3,30 +3,55 @@ const state = {
   status: "all",
   logLevel: "ALL",
   regions: [],
+  user: null,
+  token: localStorage.getItem("gameops_token") || "",
   timer: null,
 };
 
 const els = {
+  loginView: document.querySelector("#loginView"),
+  appShell: document.querySelector("#appShell"),
+  loginForm: document.querySelector("#loginForm"),
+  loginUsername: document.querySelector("#loginUsername"),
+  loginPassword: document.querySelector("#loginPassword"),
   metrics: document.querySelector("#metricsGrid"),
   regions: document.querySelector("#regionFilters"),
   regionCards: document.querySelector("#regionCards"),
-  serverRows: document.querySelector("#serverRows"),
+  workloadRows: document.querySelector("#workloadRows"),
   alertList: document.querySelector("#alertList"),
   deploymentList: document.querySelector("#deploymentList"),
   logConsole: document.querySelector("#logConsole"),
   deployRegion: document.querySelector("#deployRegion"),
   deployStrategy: document.querySelector("#deployStrategy"),
   deployVersion: document.querySelector("#deployVersion"),
-  operator: document.querySelector("#operator"),
+  deployImage: document.querySelector("#deployImage"),
   statusFilter: document.querySelector("#statusFilter"),
   logFilter: document.querySelector("#logFilter"),
   autoRefresh: document.querySelector("#autoRefresh"),
   refreshBtn: document.querySelector("#refreshBtn"),
+  logoutBtn: document.querySelector("#logoutBtn"),
   deployForm: document.querySelector("#deployForm"),
   clock: document.querySelector("#clock"),
   toast: document.querySelector("#toast"),
   trendCanvas: document.querySelector("#trendCanvas"),
+  runtimePill: document.querySelector("#runtimePill"),
+  userPill: document.querySelector("#userPill"),
+  cmdbGrid: document.querySelector("#cmdbGrid"),
+  notifyBtn: document.querySelector("#notifyBtn"),
+  diagnoseBtn: document.querySelector("#diagnoseBtn"),
+  reportBtn: document.querySelector("#reportBtn"),
+  aiOutput: document.querySelector("#aiOutput"),
 };
+
+const roleLabels = {
+  admin: "管理员",
+  release_manager: "发布负责人",
+  observer: "只读观察员",
+};
+
+function has(permission) {
+  return Boolean(state.user?.permissions?.includes(permission));
+}
 
 function formatNumber(value) {
   return new Intl.NumberFormat("zh-CN").format(value);
@@ -42,51 +67,89 @@ function normalizeTime(value) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  const data = await response.json();
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const response = await fetch(path, { ...options, headers });
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    throw new Error(data.error || "请求失败");
+    const message = typeof data === "string" ? data : data.error;
+    throw new Error(message || "请求失败");
   }
   return data;
 }
 
+async function bootstrap() {
+  if (!state.token) {
+    showLogin();
+    return;
+  }
+  try {
+    const me = await api("/api/me");
+    if (!me.authenticated) throw new Error("登录已过期");
+    state.user = me.user;
+    showApp();
+    await loadAll();
+  } catch (error) {
+    localStorage.removeItem("gameops_token");
+    state.token = "";
+    showLogin();
+  }
+}
+
+function showLogin() {
+  els.loginView.hidden = false;
+  els.appShell.hidden = true;
+  syncIcons();
+}
+
+function showApp() {
+  els.loginView.hidden = true;
+  els.appShell.hidden = false;
+  els.userPill.textContent = `${state.user.display_name} · ${roleLabels[state.user.role] || state.user.role}`;
+  syncPermissionState();
+  setupTimer();
+  syncIcons();
+}
+
 async function loadAll() {
   try {
-    const query = new URLSearchParams({
-      region: state.region,
-      status: state.status,
-    });
-    const logQuery = new URLSearchParams({
-      level: state.logLevel,
-      limit: "80",
-    });
-    const [overview, servers, alerts, logs, deployments] = await Promise.all([
+    const query = new URLSearchParams({ region: state.region, status: state.status });
+    const logQuery = new URLSearchParams({ level: state.logLevel, limit: "100" });
+    const [overview, workloads, alerts, logs, deployments, cmdb] = await Promise.all([
       api("/api/overview"),
-      api(`/api/servers?${query}`),
+      api(`/api/workloads?${query}`),
       api("/api/alerts"),
       api(`/api/logs?${logQuery}`),
       api("/api/deployments"),
+      api("/api/cmdb"),
     ]);
     state.regions = overview.regions;
-    renderMetrics(overview.summary);
+    els.runtimePill.textContent = `runtime ${overview.runtime}`;
+    renderMetrics(overview.summary, overview.host);
     renderRegionFilters();
     renderRegionCards(overview.regions);
-    renderServers(servers);
+    renderWorkloads(workloads);
     renderAlerts(alerts);
     renderDeployments(deployments);
     renderLogs(logs);
     renderDeployRegionOptions();
+    renderCmdb(cmdb);
     drawTrend(overview.trend);
+    syncPermissionState();
     syncIcons();
   } catch (error) {
+    if (String(error.message).includes("请先登录")) {
+      localStorage.removeItem("gameops_token");
+      state.token = "";
+      showLogin();
+      return;
+    }
     showToast(error.message);
   }
 }
 
-function renderMetrics(summary) {
+function renderMetrics(summary, host) {
   const metrics = [
     {
       label: "在线玩家",
@@ -96,11 +159,11 @@ function renderMetrics(summary) {
       icon: "users",
     },
     {
-      label: "健康节点",
-      value: `${summary.healthy_servers}/${summary.total_servers}`,
+      label: "健康工作负载",
+      value: `${summary.healthy_workloads}/${summary.total_workloads}`,
       sub: `平均 CPU ${summary.avg_cpu}%`,
       tone: "blue",
-      icon: "server-cog",
+      icon: "boxes",
     },
     {
       label: "活跃告警",
@@ -112,7 +175,7 @@ function renderMetrics(summary) {
     {
       label: "P95 延迟",
       value: `${summary.avg_latency_p95}ms`,
-      sub: "全战区平均",
+      sub: `宿主机 CPU ${host.cpu_percent}%`,
       tone: summary.avg_latency_p95 > 130 ? "red" : "violet",
       icon: "gauge",
     },
@@ -167,7 +230,7 @@ function renderRegionCards(regions) {
           <div class="region-main">
             <div>
               <strong>${region.name}</strong>
-              <span>${region.city} · ${region.owner} · ${region.server_count} 台</span>
+              <span>${region.city} · ${region.owner} · ${region.workload_count} 个 Deployment</span>
             </div>
             <span>${region.traffic_weight}%</span>
           </div>
@@ -191,32 +254,48 @@ function renderRegionCards(regions) {
     .join("");
 }
 
-function renderServers(servers) {
-  if (!servers.length) {
-    els.serverRows.innerHTML = `<tr><td colspan="8" class="empty">没有符合条件的服务器</td></tr>`;
+function renderWorkloads(workloads) {
+  if (!workloads.length) {
+    els.workloadRows.innerHTML = `<tr><td colspan="10" class="empty">没有符合条件的工作负载</td></tr>`;
     return;
   }
-  els.serverRows.innerHTML = servers
+  els.workloadRows.innerHTML = workloads
     .map(
-      (server) => `
+      (workload) => `
         <tr>
           <td>
             <div class="server-name">
-              <strong>${server.name}</strong>
-              <span>${server.id}</span>
-              ${statusChip(server.status)}
+              <strong>${workload.name}</strong>
+              <span>${workload.id} · ${workload.game_mode}</span>
+              ${statusChip(workload.status)}
             </div>
           </td>
-          <td>${server.game_mode}</td>
-          <td>${formatNumber(server.players)} / ${formatNumber(server.capacity)}</td>
-          <td>${meter(server.cpu, "%")}</td>
-          <td>${meter(server.memory, "%")}</td>
-          <td>${server.latency_p95}ms</td>
-          <td>${server.version}</td>
+          <td>${workload.namespace}/${workload.deployment}</td>
+          <td>${workload.service}</td>
+          <td>${formatNumber(workload.players)} / ${formatNumber(workload.capacity)}</td>
+          <td>${meter(workload.cpu, "%")}</td>
+          <td>${meter(workload.memory, "%")}</td>
+          <td>${workload.latency_p95}ms</td>
           <td>
-            <button class="button small" data-action="restart" data-id="${server.id}" title="重启服务器">
+            <div class="image-cell">
+              <strong>${workload.version}</strong>
+              <span>${workload.image}</span>
+            </div>
+          </td>
+          <td>
+            <div class="replica-control">
+              <button class="button icon-only small" data-action="scale" data-id="${workload.id}" data-replicas="${workload.replicas - 1}" title="缩容">
+                <i data-lucide="minus"></i>
+              </button>
+              <span>${workload.replicas}/${workload.desired_replicas}</span>
+              <button class="button icon-only small" data-action="scale" data-id="${workload.id}" data-replicas="${workload.replicas + 1}" title="扩容">
+                <i data-lucide="plus"></i>
+              </button>
+            </div>
+          </td>
+          <td>
+            <button class="button icon-only small" data-action="restart" data-id="${workload.id}" title="重启容器或滚动重启 Deployment">
               <i data-lucide="rotate-cw"></i>
-              <span>重启</span>
             </button>
           </td>
         </tr>
@@ -226,11 +305,7 @@ function renderServers(servers) {
 }
 
 function statusChip(status) {
-  const labels = {
-    running: "运行中",
-    degraded: "降级",
-    maintenance: "维护",
-  };
+  const labels = { running: "运行中", degraded: "降级", maintenance: "维护" };
   return `<span class="chip ${status}">${labels[status] || status}</span>`;
 }
 
@@ -252,14 +327,14 @@ function renderAlerts(alerts) {
     return;
   }
   els.alertList.innerHTML = alerts
-    .slice(0, 8)
+    .slice(0, 10)
     .map(
       (alert) => `
         <article class="alert-item ${alert.severity}">
           <div class="alert-main">
             <div>
               <strong>${alert.title}</strong>
-              <span>${alert.server_name} · ${alert.metric}</span>
+              <span>${alert.workload_name} · ${alert.metric}</span>
             </div>
             <span>${alert.severity}</span>
           </div>
@@ -282,11 +357,11 @@ function renderDeployments(deployments) {
           <div class="deployment-main">
             <div>
               <strong>${deployment.id} · ${deployment.version}</strong>
-              <span>${deployment.strategy} · ${deployment.region}</span>
+              <span>${deployment.strategy} · ${deployment.region} · ${deployment.target_count} 个目标</span>
             </div>
-            <span>${deployment.status}</span>
+            <span class="deploy-status ${deployment.status}">${deployment.status}</span>
           </div>
-          <div class="empty">${normalizeTime(deployment.finished_at)} · ${deployment.operator} · ${deployment.target_count} 台</div>
+          <div class="empty">${normalizeTime(deployment.finished_at)} · ${deployment.operator}</div>
         </article>
       `
     )
@@ -305,11 +380,60 @@ function renderLogs(logs) {
           <span class="log-time">${normalizeTime(log.time)}</span>
           <span class="log-level ${log.level}">${log.level}</span>
           <span>${log.source}</span>
+          <span>${log.actor || "-"}</span>
           <span>${log.message}</span>
         </div>
       `
     )
     .join("");
+}
+
+function renderCmdb(cmdb) {
+  const regionItems = cmdb.regions
+    .map((region) => `<span>${region.name}<b>${region.traffic_weight}%</b></span>`)
+    .join("");
+  const relationItems = cmdb.relationships
+    .slice(0, 8)
+    .map(
+      (item) => `
+        <div class="cmdb-relation">
+          <strong>${item.workload_id}</strong>
+          <span>${item.namespace}/${item.deployment} → ${item.service}</span>
+        </div>
+      `
+    )
+    .join("");
+  els.cmdbGrid.innerHTML = `
+    <div class="cmdb-card">
+      <p class="eyebrow">Regions</p>
+      <div class="cmdb-tags">${regionItems}</div>
+    </div>
+    <div class="cmdb-card">
+      <p class="eyebrow">Relations</p>
+      <div class="cmdb-relations">${relationItems}</div>
+    </div>
+  `;
+}
+
+function renderAiResult(title, data) {
+  if (!data) {
+    els.aiOutput.innerHTML = `<div class="empty">暂无 AI 输出</div>`;
+    return;
+  }
+  if (Array.isArray(data.actions) || Array.isArray(data.highlights)) {
+    const list = data.actions || data.highlights || [];
+    const extra = data.root_causes || data.risks || [];
+    els.aiOutput.innerHTML = `
+      <article>
+        <strong>${data.title || title}</strong>
+        <p>${data.summary || ""}</p>
+        <ul>${list.map((item) => `<li>${item}</li>`).join("")}</ul>
+        <div class="empty">${extra.slice(0, 4).join(" · ")}</div>
+      </article>
+    `;
+  } else {
+    els.aiOutput.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+  }
 }
 
 function drawTrend(trend) {
@@ -324,17 +448,20 @@ function drawTrend(trend) {
   const height = rect.height;
   ctx.clearRect(0, 0, width, height);
   drawGrid(ctx, width, height);
-  drawLine(ctx, trend.players || [], width, height, "#16806f", "players");
-  drawLine(ctx, trend.latency || [], width, height, "#7055b8", "latency");
-  ctx.fillStyle = "#667065";
+  drawLine(ctx, trend.players || [], width, height, "#16806f");
+  drawLine(ctx, trend.latency || [], width, height, "#7055b8");
+  drawLine(ctx, trend.host_cpu || [], width, height, "#b36b00");
+  ctx.fillStyle = "#16806f";
   ctx.font = "12px Microsoft YaHei, Segoe UI, Arial";
   ctx.fillText("在线玩家", 16, 24);
   ctx.fillStyle = "#7055b8";
-  ctx.fillText("P95 延迟", 92, 24);
+  ctx.fillText("P95 延迟", 86, 24);
+  ctx.fillStyle = "#b36b00";
+  ctx.fillText("宿主机 CPU", 154, 24);
 }
 
 function drawGrid(ctx, width, height) {
-  ctx.strokeStyle = "#e0e6dc";
+  ctx.strokeStyle = "#dce3e1";
   ctx.lineWidth = 1;
   for (let i = 1; i <= 4; i += 1) {
     const y = (height / 5) * i;
@@ -345,15 +472,15 @@ function drawGrid(ctx, width, height) {
   }
 }
 
-function drawLine(ctx, values, width, height, color, mode) {
+function drawLine(ctx, values, width, height, color) {
   if (values.length < 2) return;
   const min = Math.min(...values);
   const max = Math.max(...values);
   const range = Math.max(1, max - min);
   const padX = 18;
-  const padY = 28;
+  const padY = 30;
   ctx.strokeStyle = color;
-  ctx.lineWidth = mode === "players" ? 2.5 : 2;
+  ctx.lineWidth = 2.2;
   ctx.beginPath();
   values.forEach((value, index) => {
     const x = padX + (index / (values.length - 1)) * (width - padX * 2);
@@ -377,7 +504,66 @@ function syncIcons() {
   }
 }
 
+function syncPermissionState() {
+  const canDeploy = has("deploy");
+  const canRestart = has("restart");
+  const canScale = has("scale");
+  const canTraffic = has("traffic");
+  const canNotify = has("notify");
+  const canAi = has("ai");
+  setDisabled(els.deployForm.querySelectorAll("input, select, button"), !canDeploy);
+  setDisabled(els.workloadRows.querySelectorAll("[data-action='restart']"), !canRestart);
+  setDisabled(els.workloadRows.querySelectorAll("[data-action='scale']"), !canScale);
+  setDisabled(els.regionCards.querySelectorAll("[data-action='traffic']"), !canTraffic);
+  els.notifyBtn.disabled = !canNotify;
+  els.diagnoseBtn.disabled = !canAi;
+  els.reportBtn.disabled = !canAi;
+}
+
+function setDisabled(nodes, disabled) {
+  nodes.forEach((node) => {
+    node.disabled = disabled;
+    node.classList.toggle("is-disabled", disabled);
+  });
+}
+
 function setupEvents() {
+  els.loginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const result = await api("/api/login", {
+        method: "POST",
+        body: JSON.stringify({
+          username: els.loginUsername.value.trim(),
+          password: els.loginPassword.value,
+        }),
+      });
+      state.token = result.token;
+      state.user = result.user;
+      localStorage.setItem("gameops_token", result.token);
+      showApp();
+      await loadAll();
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+  document.querySelector(".quick-users").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-user]");
+    if (!button) return;
+    els.loginUsername.value = button.dataset.user;
+    els.loginPassword.value = button.dataset.pass;
+  });
+  els.logoutBtn.addEventListener("click", async () => {
+    try {
+      await api("/api/logout", { method: "POST", body: "{}" });
+    } catch (error) {
+      // Logout still clears local state if the session is already gone.
+    }
+    localStorage.removeItem("gameops_token");
+    state.token = "";
+    state.user = null;
+    showLogin();
+  });
   els.refreshBtn.addEventListener("click", loadAll);
   els.statusFilter.addEventListener("change", (event) => {
     state.status = event.target.value;
@@ -394,16 +580,27 @@ function setupEvents() {
     state.region = button.dataset.region;
     loadAll();
   });
-  els.serverRows.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-action='restart']");
-    if (!button) return;
-    await performAction(async () => {
-      await api(`/api/servers/${button.dataset.id}/restart`, {
-        method: "POST",
-        body: JSON.stringify({ operator: els.operator.value || "ops-user" }),
+  els.workloadRows.addEventListener("click", async (event) => {
+    const restart = event.target.closest("[data-action='restart']");
+    const scale = event.target.closest("[data-action='scale']");
+    if (restart) {
+      await performAction(async () => {
+        await api(`/api/workloads/${restart.dataset.id}/restart`, {
+          method: "POST",
+          body: JSON.stringify({ operator: state.user.username }),
+        });
+        showToast("重启动作已提交");
       });
-      showToast("服务器已重启");
-    });
+    }
+    if (scale) {
+      await performAction(async () => {
+        await api(`/api/workloads/${scale.dataset.id}/scale`, {
+          method: "POST",
+          body: JSON.stringify({ replicas: Number(scale.dataset.replicas), operator: state.user.username }),
+        });
+        showToast("扩缩容动作已提交");
+      });
+    }
   });
   els.regionCards.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-action='traffic']");
@@ -414,7 +611,7 @@ function setupEvents() {
         body: JSON.stringify({
           region: button.dataset.region,
           delta: Number(button.dataset.delta),
-          operator: els.operator.value || "ops-user",
+          operator: state.user.username,
         }),
       });
       showToast("流量权重已调整");
@@ -429,18 +626,40 @@ function setupEvents() {
           region: els.deployRegion.value,
           version: els.deployVersion.value.trim(),
           strategy: els.deployStrategy.value,
-          operator: els.operator.value.trim() || "release-bot",
+          image: els.deployImage.value.trim(),
+          operator: state.user.username,
         }),
       });
       showToast(`${deployment.id} 发布完成`);
     });
   });
+  els.notifyBtn.addEventListener("click", async () => {
+    await performAction(async () => {
+      await api("/api/notify/alerts", {
+        method: "POST",
+        body: JSON.stringify({ operator: state.user.username }),
+      });
+      showToast("告警通知已发送或记录为跳过");
+    });
+  });
+  els.diagnoseBtn.addEventListener("click", async () => {
+    await performAction(async () => {
+      const data = await api("/api/ai/diagnosis");
+      renderAiResult("AI 故障诊断", data);
+    }, false);
+  });
+  els.reportBtn.addEventListener("click", async () => {
+    await performAction(async () => {
+      const data = await api("/api/ai/report");
+      renderAiResult("AI 运维报告", data);
+    }, false);
+  });
 }
 
-async function performAction(action) {
+async function performAction(action, reload = true) {
   try {
     await action();
-    await loadAll();
+    if (reload) await loadAll();
   } catch (error) {
     showToast(error.message);
   }
@@ -451,8 +670,8 @@ function setupTimer() {
     clearInterval(state.timer);
     state.timer = null;
   }
-  if (els.autoRefresh.checked) {
-    state.timer = setInterval(loadAll, 8000);
+  if (els.autoRefresh.checked && !els.appShell.hidden) {
+    state.timer = setInterval(loadAll, 10000);
   }
 }
 
@@ -471,6 +690,4 @@ function setupClock() {
 
 setupEvents();
 setupClock();
-setupTimer();
-loadAll();
-
+bootstrap();

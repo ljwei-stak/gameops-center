@@ -9,13 +9,42 @@
     <script defer src="/app.js"></script>
   </head>
   <body>
-    <div class="app-shell">
+    <div class="login-view" id="loginView">
+      <form class="login-panel" id="loginForm">
+        <div class="brand login-brand">
+          <div class="brand-mark">GO</div>
+          <div>
+            <p>GameOps</p>
+            <strong>自动化运维中心</strong>
+          </div>
+        </div>
+        <label>
+          <span>账号</span>
+          <input id="loginUsername" value="admin" autocomplete="username" />
+        </label>
+        <label>
+          <span>密码</span>
+          <input id="loginPassword" value="admin123" type="password" autocomplete="current-password" />
+        </label>
+        <div class="quick-users" aria-label="快速账号">
+          <button type="button" data-user="admin" data-pass="admin123">管理员</button>
+          <button type="button" data-user="release" data-pass="release123">发布负责人</button>
+          <button type="button" data-user="viewer" data-pass="viewer123">观察员</button>
+        </div>
+        <button class="button primary full" type="submit" title="登录">
+          <i data-lucide="log-in"></i>
+          <span>登录</span>
+        </button>
+      </form>
+    </div>
+
+    <div class="app-shell" id="appShell" hidden>
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">GO</div>
           <div>
             <p>GameOps</p>
-            <strong>运维控制台</strong>
+            <strong>自动化运维中心</strong>
           </div>
         </div>
         <nav class="nav-list" aria-label="主导航">
@@ -23,40 +52,52 @@
             <i data-lucide="activity"></i>
             <span>总览</span>
           </a>
+          <a href="#cmdb" class="nav-item">
+            <i data-lucide="database"></i>
+            <span>CMDB</span>
+          </a>
           <a href="#fleet" class="nav-item">
-            <i data-lucide="server"></i>
-            <span>区服</span>
+            <i data-lucide="boxes"></i>
+            <span>工作负载</span>
           </a>
           <a href="#release" class="nav-item">
             <i data-lucide="rocket"></i>
             <span>发布</span>
+          </a>
+          <a href="#aiops" class="nav-item">
+            <i data-lucide="sparkles"></i>
+            <span>AI</span>
           </a>
           <a href="#logs" class="nav-item">
             <i data-lucide="scroll-text"></i>
             <span>日志</span>
           </a>
         </nav>
-        <div class="sidebar-footer">
+        <a class="sidebar-footer" href="/metrics" target="_blank" rel="noreferrer">
           <span class="status-dot"></span>
-          <span>Live API</span>
-        </div>
+          <span>Prometheus /metrics</span>
+        </a>
       </aside>
 
       <main class="workspace">
         <header class="topbar" id="overview">
           <div>
             <p class="eyebrow">GameOps Center</p>
-            <h1>游戏服务器运维控制台</h1>
+            <h1>游戏区服云原生运维控制台</h1>
           </div>
           <div class="top-actions">
+            <span class="runtime-pill" id="runtimePill">runtime --</span>
+            <span class="user-pill" id="userPill">--</span>
             <span class="clock" id="clock">--:--:--</span>
             <label class="toggle">
               <input id="autoRefresh" type="checkbox" checked />
               <span>自动刷新</span>
             </label>
-            <button class="button primary" id="refreshBtn" title="刷新数据">
+            <button class="button icon-only" id="refreshBtn" title="刷新">
               <i data-lucide="refresh-cw"></i>
-              <span>刷新</span>
+            </button>
+            <button class="button icon-only" id="logoutBtn" title="退出登录">
+              <i data-lucide="log-out"></i>
             </button>
           </div>
         </header>
@@ -67,8 +108,8 @@
           <section class="panel span-12" id="fleet">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Fleet</p>
-                <h2>游戏区服状态</h2>
+                <p class="eyebrow">Kubernetes Fleet</p>
+                <h2>Deployment / Pod / Service</h2>
               </div>
               <div class="filter-row">
                 <div class="segmented" id="regionFilters"></div>
@@ -84,17 +125,19 @@
               <table>
                 <thead>
                   <tr>
-                    <th>服务器</th>
-                    <th>模式</th>
-                    <th>玩家</th>
+                    <th>工作负载</th>
+                    <th>Deployment</th>
+                    <th>Service</th>
+                    <th>玩家 / 容量</th>
                     <th>CPU</th>
                     <th>内存</th>
                     <th>P95</th>
-                    <th>版本</th>
+                    <th>镜像版本</th>
+                    <th>副本</th>
                     <th>操作</th>
                   </tr>
                 </thead>
-                <tbody id="serverRows"></tbody>
+                <tbody id="workloadRows"></tbody>
               </table>
             </div>
           </section>
@@ -102,8 +145,8 @@
           <section class="panel span-4">
             <div class="panel-head">
               <div>
-                <p class="eyebrow">Regions</p>
-                <h2>流量权重</h2>
+                <p class="eyebrow">Traffic</p>
+                <h2>战区流量</h2>
               </div>
             </div>
             <div class="region-stack" id="regionCards"></div>
@@ -113,17 +156,17 @@
             <div class="panel-head">
               <div>
                 <p class="eyebrow">Trend</p>
-                <h2>在线与延迟</h2>
+                <h2>业务与宿主机趋势</h2>
               </div>
             </div>
-            <canvas id="trendCanvas" width="720" height="240" aria-label="在线玩家和延迟趋势"></canvas>
+            <canvas id="trendCanvas" width="720" height="260" aria-label="趋势图"></canvas>
           </section>
 
           <section class="panel span-3" id="release">
             <div class="panel-head">
               <div>
                 <p class="eyebrow">Release</p>
-                <h2>发布编排</h2>
+                <h2>镜像版本切换</h2>
               </div>
             </div>
             <form class="deploy-form" id="deployForm">
@@ -144,27 +187,61 @@
                 <input id="deployVersion" value="v1.9.0" autocomplete="off" />
               </label>
               <label>
-                <span>操作人</span>
-                <input id="operator" value="ops-admin" autocomplete="off" />
+                <span>镜像</span>
+                <input id="deployImage" placeholder="留空按工作负载自动替换 tag" autocomplete="off" />
               </label>
               <button class="button primary full" type="submit" title="执行发布">
                 <i data-lucide="rocket"></i>
-                <span>执行发布</span>
+                <span>发布</span>
               </button>
             </form>
           </section>
 
-          <section class="panel span-4">
+          <section class="panel span-6" id="cmdb">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">CMDB</p>
+                <h2>资产关系</h2>
+              </div>
+            </div>
+            <div class="cmdb-grid" id="cmdbGrid"></div>
+          </section>
+
+          <section class="panel span-6">
             <div class="panel-head">
               <div>
                 <p class="eyebrow">Alerts</p>
-                <h2>实时告警</h2>
+                <h2>活跃告警</h2>
               </div>
+              <button class="button small" id="notifyBtn" title="推送告警">
+                <i data-lucide="send"></i>
+                <span>推送</span>
+              </button>
             </div>
             <div class="alert-list" id="alertList"></div>
           </section>
 
-          <section class="panel span-4">
+          <section class="panel span-5" id="aiops">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">AI Ops</p>
+                <h2>诊断与报告</h2>
+              </div>
+              <div class="row-actions">
+                <button class="button small" id="diagnoseBtn" title="生成诊断">
+                  <i data-lucide="stethoscope"></i>
+                  <span>诊断</span>
+                </button>
+                <button class="button small" id="reportBtn" title="生成报告">
+                  <i data-lucide="file-text"></i>
+                  <span>报告</span>
+                </button>
+              </div>
+            </div>
+            <div class="ai-output" id="aiOutput"></div>
+          </section>
+
+          <section class="panel span-7">
             <div class="panel-head">
               <div>
                 <p class="eyebrow">Deployments</p>
@@ -174,11 +251,11 @@
             <div class="deployment-list" id="deploymentList"></div>
           </section>
 
-          <section class="panel span-8" id="logs">
+          <section class="panel span-12" id="logs">
             <div class="panel-head">
               <div>
                 <p class="eyebrow">Logs</p>
-                <h2>操作与系统日志</h2>
+                <h2>告警、发布与操作日志</h2>
               </div>
               <select id="logFilter" aria-label="日志级别">
                 <option value="ALL">全部级别</option>

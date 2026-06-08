@@ -1,0 +1,39 @@
+- name: Deploy GameOps Center
+  hosts: gameops
+  become: true
+  vars:
+    gameops_dir: /opt/gameops-center
+  tasks:
+    - name: Install base packages
+      ansible.builtin.package:
+        name:
+          - docker.io
+          - docker-compose-plugin
+          - python3
+        state: present
+
+    - name: Ensure Docker service is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create application directory
+      ansible.builtin.file:
+        path: "{{ gameops_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Sync project files
+      ansible.builtin.copy:
+        src: ../../
+        dest: "{{ gameops_dir }}"
+        mode: preserve
+
+    - name: Start GameOps with Docker Compose
+      ansible.builtin.command:
+        cmd: docker compose -f deploy/docker/docker-compose.yml up -d --build
+        chdir: "{{ gameops_dir }}"
+      changed_when: true

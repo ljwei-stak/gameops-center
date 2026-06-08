@@ -1,0 +1,50 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: gameops-mysql
+    environment:
+      MYSQL_DATABASE: ${GAMEOPS_MYSQL_DATABASE:-gameops}
+      MYSQL_USER: ${GAMEOPS_MYSQL_USER:-gameops}
+      MYSQL_PASSWORD: ${GAMEOPS_MYSQL_PASSWORD:-gameops-pass}
+      MYSQL_ROOT_PASSWORD: ${GAMEOPS_MYSQL_ROOT_PASSWORD:-root-pass}
+    ports:
+      - "${GAMEOPS_MYSQL_PUBLISHED_PORT:-3307}:3306"
+    volumes:
+      - gameops-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${GAMEOPS_MYSQL_ROOT_PASSWORD:-root-pass}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  gameops-center:
+    build:
+      context: ../..
+    image: gameops-center:local
+    container_name: gameops-center
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8018:8018"
+    environment:
+      GAMEOPS_MYSQL_HOST: mysql
+      GAMEOPS_MYSQL_PORT: 3306
+      GAMEOPS_MYSQL_DATABASE: ${GAMEOPS_MYSQL_DATABASE:-gameops}
+      GAMEOPS_MYSQL_USER: ${GAMEOPS_MYSQL_USER:-gameops}
+      GAMEOPS_MYSQL_PASSWORD: ${GAMEOPS_MYSQL_PASSWORD:-gameops-pass}
+      GAMEOPS_HOST: 0.0.0.0
+      GAMEOPS_RUNTIME: kubernetes
+      GAMEOPS_DRY_RUN: "true"
+      GAMEOPS_WEBHOOK_URL: ${GAMEOPS_WEBHOOK_URL:-}
+      GAMEOPS_WECOM_WEBHOOK: ${GAMEOPS_WECOM_WEBHOOK:-}
+      GAMEOPS_DINGTALK_WEBHOOK: ${GAMEOPS_DINGTALK_WEBHOOK:-}
+      GAMEOPS_LLM_API_KEY: ${GAMEOPS_LLM_API_KEY:-}
+      GAMEOPS_LLM_API_BASE: ${GAMEOPS_LLM_API_BASE:-https://api.openai.com/v1}
+      GAMEOPS_LLM_MODEL: ${GAMEOPS_LLM_MODEL:-gpt-4.1-mini}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOME:-~}/.kube:/home/gameops/.kube:ro
+
+volumes:
+  gameops-mysql-data:

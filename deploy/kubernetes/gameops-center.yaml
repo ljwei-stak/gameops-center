@@ -1,0 +1,217 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gameops
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gameops-center-config
+  namespace: gameops
+data:
+  GAMEOPS_HOST: 0.0.0.0
+  GAMEOPS_RUNTIME: kubernetes
+  GAMEOPS_DRY_RUN: "false"
+  GAMEOPS_MYSQL_HOST: gameops-mysql
+  GAMEOPS_MYSQL_PORT: "3306"
+  GAMEOPS_MYSQL_DATABASE: gameops
+  GAMEOPS_MYSQL_USER: gameops
+  GAMEOPS_LLM_API_BASE: https://api.openai.com/v1
+  GAMEOPS_LLM_MODEL: gpt-4.1-mini
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gameops-secrets
+  namespace: gameops
+type: Opaque
+stringData:
+  mysql-password: gameops-pass
+  mysql-root-password: root-pass
+  llm-api-key: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gameops-mysql-data
+  namespace: gameops
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gameops-mysql
+  namespace: gameops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gameops-mysql
+  template:
+    metadata:
+      labels:
+        app: gameops-mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_DATABASE
+              value: gameops
+            - name: MYSQL_USER
+              value: gameops
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gameops-secrets
+                  key: mysql-password
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gameops-secrets
+                  key: mysql-root-password
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+          readinessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: gameops-mysql-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gameops-mysql
+  namespace: gameops
+spec:
+  selector:
+    app: gameops-mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gameops-center
+  namespace: gameops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gameops-center-operator
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gameops-center-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gameops-center-operator
+subjects:
+  - kind: ServiceAccount
+    name: gameops-center
+    namespace: gameops
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gameops-center
+  namespace: gameops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gameops-center
+  template:
+    metadata:
+      labels:
+        app: gameops-center
+    spec:
+      serviceAccountName: gameops-center
+      containers:
+        - name: app
+          image: registry.example.com/platform/gameops-center:v2.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8018
+          envFrom:
+            - configMapRef:
+                name: gameops-center-config
+          env:
+            - name: GAMEOPS_MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gameops-secrets
+                  key: mysql-password
+            - name: GAMEOPS_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gameops-secrets
+                  key: llm-api-key
+                  optional: true
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8018
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8018
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gameops-center
+  namespace: gameops
+  labels:
+    app: gameops-center
+spec:
+  selector:
+    app: gameops-center
+  ports:
+    - name: http
+      port: 8018
+      targetPort: 8018
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gameops-center
+  namespace: gameops
+spec:
+  selector:
+    matchLabels:
+      app: gameops-center
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

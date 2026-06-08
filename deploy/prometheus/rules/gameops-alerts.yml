@@ -8,9 +8,9 @@ groups:
           severity: critical
           region: platform
         annotations:
-          summary: "GameOps Center 采集目标不可达"
-          description: "Prometheus 已经 1 分钟无法抓取 GameOps Center /metrics。"
-          runbook: "检查 gameops-center 容器、MySQL 连接和应用启动日志。"
+          summary: "GameOps Center scrape target is down"
+          description: "Prometheus cannot scrape GameOps Center /metrics."
+          runbook: "Check the gameops-center container, MySQL connectivity, and application startup logs."
 
       - alert: GameOpsHighHostCPU
         expr: gameops_host_cpu_percent > 80
@@ -19,9 +19,9 @@ groups:
           severity: warning
           region: platform
         annotations:
-          summary: "宿主机 CPU 使用率过高"
-          description: "CPU 当前为 {{ $value | humanize }}%，持续超过 80%。"
-          runbook: "检查后台任务、容器资源限制和扩容计划。"
+          summary: "GameOps host CPU is high"
+          description: "Host CPU has stayed above 80 percent."
+          runbook: "Check background jobs, container limits, and scale-out options."
 
       - alert: GameOpsHighHostMemory
         expr: gameops_host_memory_percent > 85
@@ -30,9 +30,9 @@ groups:
           severity: warning
           region: platform
         annotations:
-          summary: "宿主机内存水位过高"
-          description: "内存当前为 {{ $value | humanize }}%，持续超过 85%。"
-          runbook: "检查进程内存、缓存、OOM 风险和 MySQL/Grafana 资源占用。"
+          summary: "GameOps host memory is high"
+          description: "Host memory has stayed above 85 percent."
+          runbook: "Check process memory, cache usage, OOM risk, and MySQL/Grafana resource pressure."
 
       - alert: GameOpsHighDiskUsage
         expr: gameops_host_disk_percent > 82
@@ -41,9 +41,9 @@ groups:
           severity: warning
           region: platform
         annotations:
-          summary: "宿主机磁盘使用率过高"
-          description: "磁盘使用率当前为 {{ $value | humanize }}%，持续超过 82%。"
-          runbook: "清理日志归档、镜像缓存、构建产物和 Prometheus 保留周期。"
+          summary: "GameOps host disk usage is high"
+          description: "Disk usage has stayed above 82 percent."
+          runbook: "Clean logs, image cache, build artifacts, and review Prometheus retention."
 
       - alert: GameOpsWorkloadCPUHigh
         expr: gameops_workload_cpu_percent > 75
@@ -51,9 +51,9 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "区服工作负载 CPU 压力过高"
-          description: "{{ $labels.workload_id }} CPU 当前为 {{ $value | humanize }}%，持续超过 75%。"
-          runbook: "优先扩容 Deployment，观察 P95 延迟和入口流量权重。"
+          summary: "Game workload CPU is high"
+          description: "{{ $labels.workload_id }} CPU has stayed above 75 percent."
+          runbook: "Scale the Deployment first, then review P95 latency and traffic weights."
 
       - alert: GameOpsWorkloadMemoryHigh
         expr: gameops_workload_memory_percent > 82
@@ -61,9 +61,9 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "区服工作负载内存水位过高"
-          description: "{{ $labels.workload_id }} 内存当前为 {{ $value | humanize }}%，持续超过 82%。"
-          runbook: "检查房间对象、会话缓存和最近发布版本，必要时滚动重启。"
+          summary: "Game workload memory is high"
+          description: "{{ $labels.workload_id }} memory has stayed above 82 percent."
+          runbook: "Review room objects, session cache, recent releases, and rolling restart options."
 
       - alert: GameOpsWorkloadLatencyHigh
         expr: gameops_workload_latency_p95_ms > 130
@@ -71,9 +71,9 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "区服 P95 延迟过高"
-          description: "{{ $labels.workload_id }} P95 延迟当前为 {{ $value | humanize }} ms，持续超过 130 ms。"
-          runbook: "检查跨区链路、战斗同步耗时、Pod 负载和网关转发。"
+          summary: "Game workload P95 latency is high"
+          description: "{{ $labels.workload_id }} P95 latency has stayed above 130 ms."
+          runbook: "Check cross-region links, battle sync cost, Pod load, and gateway forwarding."
 
       - alert: GameOpsWorkloadDownOrDegraded
         expr: gameops_workload_status < 1
@@ -81,9 +81,9 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "区服工作负载不可用或处于降级状态"
-          description: "{{ $labels.workload_id }} 状态值为 {{ $value | humanize }}，需要立即确认。"
-          runbook: "查看 Deployment rollout、Pod 事件、最近发布记录和容器日志。"
+          summary: "Game workload is degraded or unavailable"
+          description: "{{ $labels.workload_id }} status value is {{ $value | humanize }}."
+          runbook: "Inspect Deployment rollout, Pod events, recent deployments, and container logs."
 
       - alert: GameOpsCapacityNearLimit
         expr: sum by (workload_id, region, namespace, deployment, service) (gameops_workload_players) / clamp_min(sum by (workload_id, region, namespace, deployment, service) (gameops_workload_capacity), 1) > 0.92
@@ -91,9 +91,9 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "区服玩家容量接近上限"
-          description: "{{ $labels.workload_id }} 容量使用率已经超过 92%。"
-          runbook: "扩容 Deployment，并根据流量权重把新容量纳入入口调度。"
+          summary: "Game workload capacity is near limit"
+          description: "{{ $labels.workload_id }} capacity usage is above 92 percent."
+          runbook: "Scale the Deployment and include new capacity in ingress traffic scheduling."
 
       - alert: GameOpsActiveCriticalAlerts
         expr: gameops_alerts_active{severity="critical"} > 0
@@ -102,6 +102,50 @@ groups:
           severity: critical
           region: platform
         annotations:
-          summary: "GameOps 内部存在 critical 告警"
-          description: "GameOps 当前记录了 {{ $value | humanize }} 条 critical 级别告警。"
-          runbook: "进入 GameOps Center 告警页查看详情，并由 Alertmanager 路由通知责任人。"
+          summary: "GameOps has active critical alerts"
+          description: "GameOps currently records critical internal alerts."
+          runbook: "Open GameOps Center alerts and let Alertmanager route the notification to the owner."
+
+      - alert: GameOpsDeploymentApprovalStale
+        expr: gameops_deployment_approvals_pending > 0
+        for: 30m
+        labels:
+          severity: warning
+          region: platform
+        annotations:
+          summary: "Deployment approvals are waiting too long"
+          description: "One or more deployment approvals have been pending for at least 30 minutes."
+          runbook: "Ask an administrator to approve or reject the release request before the change window closes."
+
+      - alert: GameOpsMySQLPoolOverflow
+        expr: increase(gameops_mysql_pool_overflow_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          region: platform
+        annotations:
+          summary: "GameOps MySQL connection pool overflow"
+          description: "The application borrowed more connections than the configured pool size."
+          runbook: "Check request concurrency, slow queries, and tune GAMEOPS_MYSQL_POOL_SIZE if the managed MySQL limit allows it."
+
+      - alert: GameOpsMySQLSlowQueries
+        expr: increase(gameops_mysql_slow_queries_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          region: platform
+        annotations:
+          summary: "GameOps application database operations are slow"
+          description: "GameOps recorded database operations slower than GAMEOPS_MYSQL_SLOW_QUERY_SECONDS."
+          runbook: "Review managed MySQL slow query logs and check connection pool saturation."
+
+      - alert: GameOpsManagedMySQLDisabled
+        expr: gameops_mysql_managed == 0
+        for: 10m
+        labels:
+          severity: info
+          region: platform
+        annotations:
+          summary: "GameOps is not configured for managed MySQL"
+          description: "GAMEOPS_MYSQL_MANAGED is false. This is acceptable for local demos but not production."
+          runbook: "Use the managed MySQL profile with automated backups, slow query logs, and TLS."

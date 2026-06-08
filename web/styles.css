@@ -459,13 +459,19 @@ h2 {
 }
 
 select,
-input {
+input,
+textarea {
   min-height: 38px;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0 10px;
   color: var(--text);
   background: var(--surface);
+}
+
+textarea {
+  padding: 8px 10px;
+  resize: vertical;
 }
 
 .table-wrap {
@@ -585,6 +591,8 @@ th {
 .region-stack,
 .alert-list,
 .deployment-list,
+.approval-list,
+.rollback-list,
 .cmdb-grid {
   display: grid;
   gap: 10px;
@@ -593,6 +601,7 @@ th {
 .region-item,
 .alert-item,
 .deployment-item,
+.approval-item,
 .cmdb-card {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -662,11 +671,45 @@ th {
   overflow: auto;
 }
 
+.approval-list,
+.rollback-list {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.sso-box {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.subhead {
+  margin: 14px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .deploy-status.success {
   color: var(--green);
 }
 
 .deploy-status.failed {
+  color: var(--red);
+}
+
+.deploy-status.pending,
+.deploy-status.approved {
+  color: var(--amber);
+}
+
+.deploy-status.executed {
+  color: var(--green);
+}
+
+.deploy-status.rejected {
   color: var(--red);
 }
 

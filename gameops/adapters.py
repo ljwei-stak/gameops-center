@@ -187,7 +187,9 @@ class CompositeAdapter:
 
     def __init__(self, mode: str | None = None, runner: CommandRunner | None = None) -> None:
         configured = (mode or os.environ.get("GAMEOPS_RUNTIME", "auto")).lower()
-        dry_run = os.environ.get("GAMEOPS_DRY_RUN", "").lower() in {"1", "true", "yes"}
+        dry_run_requested = os.environ.get("GAMEOPS_DRY_RUN", "true").lower() not in {"0", "false", "no"}
+        trusted_runtime = os.environ.get("GAMEOPS_TRUSTED_RUNTIME", "").lower() in {"1", "true", "yes"}
+        dry_run = dry_run_requested or not trusted_runtime
         runner = runner or CommandRunner(dry_run=dry_run)
         if configured == "kubernetes":
             self.adapter: RuntimeAdapter = KubernetesAdapter(runner)

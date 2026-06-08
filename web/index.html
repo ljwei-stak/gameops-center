@@ -35,6 +35,16 @@
           <i data-lucide="log-in"></i>
           <span>登录</span>
         </button>
+        <div class="sso-box">
+          <label>
+            <span>OIDC ID Token</span>
+            <textarea id="ssoToken" rows="3" placeholder="Paste an ID token from the OIDC gateway"></textarea>
+          </label>
+          <button class="button full" type="button" id="ssoLoginBtn" title="SSO/OIDC login">
+            <i data-lucide="key-round"></i>
+            <span>SSO/OIDC</span>
+          </button>
+        </div>
       </form>
     </div>
 
@@ -197,6 +207,16 @@
             </form>
           </section>
 
+          <section class="panel span-5">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Approvals</p>
+                <h2>Release governance</h2>
+              </div>
+            </div>
+            <div class="approval-list" id="approvalList"></div>
+          </section>
+
           <section class="panel span-6" id="cmdb">
             <div class="panel-head">
               <div>
@@ -249,6 +269,8 @@
               </div>
             </div>
             <div class="deployment-list" id="deploymentList"></div>
+            <div class="subhead">Rollback records</div>
+            <div class="rollback-list" id="rollbackList"></div>
           </section>
 
           <section class="panel span-12" id="logs">

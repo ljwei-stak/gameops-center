@@ -1,5 +1,7 @@
 # GameOps Center
 
+Production hardening is documented in `docs/production-operations.md`. It covers managed MySQL backups/slow-query logging/pool monitoring, Alembic and Flyway migrations, SSO/OIDC, approval and rollback governance, trusted-runtime dry-run controls, least-privilege Kubernetes RBAC, and Prometheus/Grafana/Alertmanager ownership of long-term metrics and alert routing.
+
 GameOps Center 是一个面向游戏区服的自动化运维项目。它把区服抽象成 Kubernetes `Deployment / Pod / Service`，用 CMDB 记录资产关系，用 MySQL 持久化告警、日志、发布记录、用户会话和指标历史，并提供 Prometheus `/metrics`、Docker/Kubernetes 运维动作、登录与 RBAC、通知渠道、CI/CD、IaC、配置管理和 AI 辅助诊断报告。
 
 ## 核心能力

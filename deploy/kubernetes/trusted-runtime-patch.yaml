@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gameops-center
+  namespace: gameops
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            - name: GAMEOPS_DRY_RUN
+              value: "false"
+            - name: GAMEOPS_TRUSTED_RUNTIME
+              value: "true"

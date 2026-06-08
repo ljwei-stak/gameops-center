@@ -8,6 +8,8 @@ import hashlib
 import json
 import os
 import secrets
+from threading import RLock
+from time import perf_counter
 from typing import Any, Iterable
 
 from .data import INITIAL_LOGS, REGIONS, USERS, WORKLOADS
@@ -45,14 +47,41 @@ class GameOpsStore:
         self.user = user or os.environ.get("GAMEOPS_MYSQL_USER", "gameops")
         self.password = password if password is not None else os.environ.get("GAMEOPS_MYSQL_PASSWORD", "gameops-pass")
         self.database = database or os.environ.get("GAMEOPS_MYSQL_DATABASE", "gameops")
+        self.pool_size = int(os.environ.get("GAMEOPS_MYSQL_POOL_SIZE", "5"))
+        self.connect_timeout = int(os.environ.get("GAMEOPS_MYSQL_CONNECT_TIMEOUT", "8"))
+        self.read_timeout = int(os.environ.get("GAMEOPS_MYSQL_READ_TIMEOUT", "15"))
+        self.write_timeout = int(os.environ.get("GAMEOPS_MYSQL_WRITE_TIMEOUT", "15"))
+        self.slow_query_seconds = float(os.environ.get("GAMEOPS_MYSQL_SLOW_QUERY_SECONDS", "1.0"))
+        self._pool: list[Any] = []
+        self._pool_lock = RLock()
+        self._pool_in_use = 0
+        self._pool_created_total = 0
+        self._pool_overflow_total = 0
+        self._slow_queries_total = 0
         self.ensure_database()
         self.init_schema()
         self.seed()
 
     @contextmanager
     def connect(self) -> Iterable[Any]:
+        conn = self._borrow_connection()
+        started = perf_counter()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            elapsed = perf_counter() - started
+            if elapsed >= self.slow_query_seconds:
+                with self._pool_lock:
+                    self._slow_queries_total += 1
+            self._return_connection(conn)
+
+    def _new_connection(self) -> Any:
         pymysql = _pymysql()
-        conn = pymysql.connect(
+        return pymysql.connect(
             host=self.host,
             port=self.port,
             user=self.user,
@@ -61,12 +90,51 @@ class GameOpsStore:
             charset="utf8mb4",
             autocommit=False,
             cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=self.connect_timeout,
+            read_timeout=self.read_timeout,
+            write_timeout=self.write_timeout,
         )
+
+    def _borrow_connection(self) -> Any:
+        with self._pool_lock:
+            if self._pool:
+                conn = self._pool.pop()
+            else:
+                conn = None
+            self._pool_in_use += 1
+            if conn is None:
+                self._pool_created_total += 1
+                if self._pool_in_use > self.pool_size:
+                    self._pool_overflow_total += 1
+        if conn is None:
+            return self._new_connection()
         try:
-            yield conn
-            conn.commit()
-        finally:
+            conn.ping(reconnect=True)
+            return conn
+        except Exception:
             conn.close()
+            return self._new_connection()
+
+    def _return_connection(self, conn: Any) -> None:
+        with self._pool_lock:
+            self._pool_in_use = max(0, self._pool_in_use - 1)
+            if len(self._pool) < self.pool_size and getattr(conn, "open", False):
+                self._pool.append(conn)
+                return
+        conn.close()
+
+    def mysql_pool_metrics(self) -> dict[str, Any]:
+        with self._pool_lock:
+            return {
+                "pool_size": self.pool_size,
+                "pool_in_use": self._pool_in_use,
+                "pool_idle": len(self._pool),
+                "connections_created_total": self._pool_created_total,
+                "pool_overflow_total": self._pool_overflow_total,
+                "slow_queries_total": self._slow_queries_total,
+                "slow_query_seconds": self.slow_query_seconds,
+                "managed": os.environ.get("GAMEOPS_MYSQL_MANAGED", "").lower() in {"1", "true", "yes"},
+            }
 
     def ensure_database(self) -> None:
         pymysql = _pymysql()
@@ -192,6 +260,44 @@ class GameOpsStore:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """,
             """
+            CREATE TABLE IF NOT EXISTS deployment_approvals (
+                id VARCHAR(64) PRIMARY KEY,
+                status VARCHAR(32) NOT NULL,
+                region VARCHAR(64) NOT NULL,
+                version VARCHAR(64) NOT NULL,
+                strategy VARCHAR(32) NOT NULL,
+                image VARCHAR(512),
+                requested_by VARCHAR(128) NOT NULL,
+                approved_by VARCHAR(128),
+                requested_at VARCHAR(40) NOT NULL,
+                approved_at VARCHAR(40),
+                executed_at VARCHAR(40),
+                change_window VARCHAR(128),
+                reason TEXT,
+                rejection_reason TEXT,
+                deployment_id VARCHAR(64),
+                payload_json JSON NOT NULL,
+                INDEX idx_deployment_approvals_status (status),
+                INDEX idx_deployment_approvals_requested_at (requested_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS rollback_records (
+                id VARCHAR(64) PRIMARY KEY,
+                deployment_id VARCHAR(64) NOT NULL,
+                rollback_deployment_id VARCHAR(64),
+                operator VARCHAR(128) NOT NULL,
+                reason TEXT,
+                from_version VARCHAR(64),
+                to_version VARCHAR(64),
+                workloads_json JSON NOT NULL,
+                command_results_json JSON NOT NULL,
+                created_at VARCHAR(40) NOT NULL,
+                INDEX idx_rollback_deployment_id (deployment_id),
+                INDEX idx_rollback_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """,
+            """
             CREATE TABLE IF NOT EXISTS metric_history (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT,
                 time VARCHAR(40) NOT NULL,
@@ -268,8 +374,10 @@ class GameOpsStore:
                         rows,
                     )
 
+                local_login_enabled = os.environ.get("GAMEOPS_LOCAL_LOGIN_ENABLED", "true").lower() not in {"0", "false", "no"}
                 cursor.execute("SELECT COUNT(*) AS count FROM users")
-                if cursor.fetchone()["count"] == 0:
+                users_count = cursor.fetchone()["count"]
+                if local_login_enabled and users_count == 0:
                     for user in USERS:
                         salt, password_hash = hash_password(user["password"])
                         cursor.execute(
@@ -529,6 +637,114 @@ class GameOpsStore:
                 )
         return deployment
 
+    def insert_deployment_approval(self, approval: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO deployment_approvals (
+                        id, status, region, version, strategy, image, requested_by,
+                        approved_by, requested_at, approved_at, executed_at,
+                        change_window, reason, rejection_reason, deployment_id, payload_json
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        approval["id"],
+                        approval["status"],
+                        approval["region"],
+                        approval["version"],
+                        approval["strategy"],
+                        approval.get("image"),
+                        approval["requested_by"],
+                        approval.get("approved_by"),
+                        approval["requested_at"],
+                        approval.get("approved_at"),
+                        approval.get("executed_at"),
+                        approval.get("change_window"),
+                        approval.get("reason"),
+                        approval.get("rejection_reason"),
+                        approval.get("deployment_id"),
+                        json.dumps(approval.get("payload", {}), ensure_ascii=False),
+                    ),
+                )
+        return approval
+
+    def update_deployment_approval(self, approval_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+        if not changes:
+            return self.get_deployment_approval(approval_id)
+        changes = dict(changes)
+        if "payload" in changes:
+            changes["payload_json"] = json.dumps(changes.pop("payload"), ensure_ascii=False)
+        assignments = ", ".join(f"`{_identifier(key)}` = %s" for key in changes)
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"UPDATE deployment_approvals SET {assignments} WHERE id = %s",
+                    [*changes.values(), approval_id],
+                )
+        return self.get_deployment_approval(approval_id)
+
+    def get_deployment_approval(self, approval_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM deployment_approvals WHERE id = %s", (approval_id,))
+                row = cursor.fetchone()
+        return _public_approval(row) if row else None
+
+    def list_deployment_approvals(self, status: str | None = None, limit: int = 80) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM deployment_approvals"
+        params: list[Any] = []
+        if status and status != "all":
+            sql += " WHERE status = %s"
+            params.append(status)
+        sql += " ORDER BY requested_at DESC LIMIT %s"
+        params.append(max(1, min(limit, 200)))
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, params)
+                rows = list(cursor.fetchall())
+        return [_public_approval(row) for row in rows]
+
+    def insert_rollback_record(self, rollback: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO rollback_records (
+                        id, deployment_id, rollback_deployment_id, operator, reason,
+                        from_version, to_version, workloads_json, command_results_json, created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        rollback["id"],
+                        rollback["deployment_id"],
+                        rollback.get("rollback_deployment_id"),
+                        rollback["operator"],
+                        rollback.get("reason"),
+                        rollback.get("from_version"),
+                        rollback.get("to_version"),
+                        json.dumps(rollback.get("workloads", []), ensure_ascii=False),
+                        json.dumps(rollback.get("command_results", []), ensure_ascii=False),
+                        rollback["created_at"],
+                    ),
+                )
+        return rollback
+
+    def list_rollbacks(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM rollback_records ORDER BY created_at DESC LIMIT %s",
+                    (max(1, min(limit, 200)),),
+                )
+                rows = list(cursor.fetchall())
+        for row in rows:
+            row["workloads"] = json.loads(row.pop("workloads_json"))
+            row["command_results"] = json.loads(row.pop("command_results_json"))
+        return rows
+
     def list_deployments(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor() as cursor:
@@ -542,12 +758,37 @@ class GameOpsStore:
             row["command_results"] = json.loads(row.pop("command_results_json"))
         return rows
 
+    def get_deployment(self, deployment_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM deployments WHERE id = %s", (deployment_id,))
+                row = cursor.fetchone()
+        if not row:
+            return None
+        row["workloads"] = json.loads(row.pop("workloads_json"))
+        row["command_results"] = json.loads(row.pop("command_results_json"))
+        return row
+
     def next_deployment_id(self) -> str:
         with self.connect() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT COUNT(*) AS count FROM deployments")
                 count = cursor.fetchone()["count"]
         return f"DEP-{2401 + count}"
+
+    def next_approval_id(self) -> str:
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) AS count FROM deployment_approvals")
+                count = cursor.fetchone()["count"]
+        return f"APR-{2401 + count}"
+
+    def next_rollback_id(self) -> str:
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) AS count FROM rollback_records")
+                count = cursor.fetchone()["count"]
+        return f"RBK-{2401 + count}"
 
     def record_metric_history(self, item: dict[str, Any]) -> None:
         with self.connect() as conn:
@@ -606,6 +847,25 @@ class GameOpsStore:
     def get_user(self, username: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             with conn.cursor() as cursor:
+                cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+                return cursor.fetchone()
+
+    def upsert_sso_user(self, username: str, display_name: str, role: str) -> dict[str, Any]:
+        created_at = now_iso()
+        with self.connect() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO users (
+                        username, display_name, role, password_hash, salt, created_at
+                    )
+                    VALUES (%s, %s, %s, '', '', %s)
+                    ON DUPLICATE KEY UPDATE
+                        display_name = VALUES(display_name),
+                        role = VALUES(role)
+                    """,
+                    (username, display_name, role, created_at),
+                )
                 cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
                 return cursor.fetchone()
 
@@ -676,6 +936,12 @@ def _public_workload(row: dict[str, Any]) -> dict[str, Any]:
     row["capacity"] = capacity
     row["capacity_rate"] = round(row["players"] / max(1, capacity), 3)
     row["pod_count"] = row["replicas"]
+    return row
+
+
+def _public_approval(row: dict[str, Any]) -> dict[str, Any]:
+    row = dict(row)
+    row["payload"] = json.loads(row.pop("payload_json"))
     return row
 
 

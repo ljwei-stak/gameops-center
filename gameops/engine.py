@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
+import base64
+import json
+import os
 import re
 from threading import RLock
 from typing import Any
@@ -38,8 +41,20 @@ class AuthorizationError(GameOpsError):
 
 
 ROLE_PERMISSIONS = {
-    "admin": {"read", "deploy", "restart", "scale", "traffic", "notify", "ai", "users"},
-    "release_manager": {"read", "deploy", "restart", "scale", "traffic", "ai"},
+    "admin": {
+        "read",
+        "deploy",
+        "approve_deploy",
+        "execute_deploy",
+        "rollback",
+        "restart",
+        "scale",
+        "traffic",
+        "notify",
+        "ai",
+        "users",
+    },
+    "release_manager": {"read", "deploy", "execute_deploy", "restart", "scale", "traffic", "ai"},
     "observer": {"read"},
 }
 
@@ -75,12 +90,37 @@ class GameOpsEngine:
         }
 
     def login(self, username: str, password: str) -> dict[str, Any]:
+        if os.environ.get("GAMEOPS_LOCAL_LOGIN_ENABLED", "true").lower() in {"0", "false", "no"}:
+            raise AuthenticationError("local password login is disabled; use SSO/OIDC")
         user = self.store.get_user(username)
-        if not user or not verify_password(password, user["salt"], user["password_hash"]):
+        if not user or not user.get("password_hash") or not verify_password(password, user["salt"], user["password_hash"]):
             raise AuthenticationError("用户名或密码错误")
         session = self.store.create_session(username)
         public_user = self._public_user(user)
         self.store.insert_log("INFO", "auth", f"{public_user['display_name']} 登录系统", actor=username)
+        return {"token": session["token"], "expires_at": session["expires_at"], "user": public_user}
+
+    def sso_login(self, id_token: str) -> dict[str, Any]:
+        claims = _decode_oidc_token(id_token)
+        issuer = claims.get("iss", "")
+        audience = claims.get("aud", "")
+        expected_issuer = os.environ.get("GAMEOPS_OIDC_ISSUER", "")
+        expected_audience = os.environ.get("GAMEOPS_OIDC_CLIENT_ID", "")
+        if expected_issuer and issuer != expected_issuer:
+            raise AuthenticationError("OIDC issuer mismatch")
+        if expected_audience and expected_audience not in (audience if isinstance(audience, list) else [audience]):
+            raise AuthenticationError("OIDC audience mismatch")
+        username = claims.get("preferred_username") or claims.get("email") or claims.get("sub")
+        if not username:
+            raise AuthenticationError("OIDC token missing username claim")
+        user = self.store.upsert_sso_user(
+            str(username),
+            str(claims.get("name") or username),
+            _oidc_role(claims),
+        )
+        session = self.store.create_session(user["username"])
+        public_user = self._public_user(user)
+        self.store.insert_log("INFO", "auth", f"{public_user['display_name']} SSO login", actor=user["username"])
         return {"token": session["token"], "expires_at": session["expires_at"], "user": public_user}
 
     def logout(self, token: str) -> None:
@@ -186,6 +226,12 @@ class GameOpsEngine:
     def list_deployments(self) -> list[dict[str, Any]]:
         return self.store.list_deployments()
 
+    def list_deployment_approvals(self, status: str | None = None) -> list[dict[str, Any]]:
+        return self.store.list_deployment_approvals(status=status)
+
+    def list_rollbacks(self) -> list[dict[str, Any]]:
+        return self.store.list_rollbacks()
+
     def restart_workload(self, workload_id: str, operator: str = "ops-user") -> dict[str, Any]:
         with self._lock:
             workload = self._require_workload(workload_id)
@@ -211,6 +257,104 @@ class GameOpsEngine:
         return self.restart_workload(server_id, operator)
 
     def deploy(
+        self,
+        region: str,
+        version: str,
+        strategy: str,
+        operator: str = "release-bot",
+        image: str | None = None,
+        reason: str | None = None,
+        change_window: str | None = None,
+    ) -> dict[str, Any]:
+        return self.request_deployment(region, version, strategy, operator, image, reason, change_window)
+
+    def request_deployment(
+        self,
+        region: str,
+        version: str,
+        strategy: str,
+        operator: str = "release-bot",
+        image: str | None = None,
+        reason: str | None = None,
+        change_window: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if not VERSION_PATTERN.match(version):
+                raise ValidationError("version must look like v1.9.0")
+            strategy = strategy.lower()
+            if strategy not in {"canary", "rolling", "hotfix"}:
+                raise ValidationError("strategy must be canary, rolling, or hotfix")
+            if region != "all":
+                self._require_region(region)
+            window = change_window or os.environ.get("GAMEOPS_CHANGE_WINDOW", "")
+            approval = {
+                "id": self.store.next_approval_id(),
+                "status": "pending",
+                "region": region,
+                "version": version,
+                "strategy": strategy,
+                "image": image,
+                "requested_by": operator,
+                "requested_at": now_iso(),
+                "change_window": window,
+                "reason": reason,
+                "payload": {
+                    "region": region,
+                    "version": version,
+                    "strategy": strategy,
+                    "image": image,
+                    "reason": reason,
+                    "change_window": window,
+                },
+            }
+            self.store.insert_deployment_approval(approval)
+            self.store.insert_log("INFO", "approval", f"{operator} requested deployment approval {approval['id']} {version}", region if region != "all" else None, None, operator)
+            self.notifications.notify_event(
+                f"GameOps deployment approval {approval['id']} pending",
+                f"{operator} requested {strategy} deploy {version} to {region}; window={window or 'unrestricted'}",
+                approval,
+            )
+            return approval
+
+    def approve_deployment(self, approval_id: str, approver: str, approved: bool = True, reason: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            approval = self._require_approval(approval_id)
+            if approval["status"] != "pending":
+                raise ValidationError("deployment approval is not pending")
+            status = "approved" if approved else "rejected"
+            updated = self.store.update_deployment_approval(
+                approval_id,
+                {
+                    "status": status,
+                    "approved_by": approver,
+                    "approved_at": now_iso(),
+                    "rejection_reason": None if approved else reason,
+                },
+            )
+            self.store.insert_log("INFO", "approval", f"{approver} marked deployment approval {approval_id} as {status}", approval["region"] if approval["region"] != "all" else None, None, approver)
+            return updated
+
+    def execute_deployment(self, approval_id: str, operator: str = "release-bot") -> dict[str, Any]:
+        with self._lock:
+            approval = self._require_approval(approval_id)
+            if approval["status"] != "approved":
+                raise ValidationError("deployment must be approved before execution")
+            if not _in_change_window(approval.get("change_window")):
+                raise ValidationError("current time is outside the approved change window")
+            deployment = self._execute_deployment(
+                approval["region"],
+                approval["version"],
+                approval["strategy"],
+                operator,
+                approval.get("image") or None,
+            )
+            self.store.update_deployment_approval(
+                approval_id,
+                {"status": "executed", "executed_at": now_iso(), "deployment_id": deployment["id"]},
+            )
+            return deployment
+
+    def _execute_deployment(
         self,
         region: str,
         version: str,
@@ -284,6 +428,53 @@ class GameOpsEngine:
                 deployment,
             )
             return deployment
+
+    def rollback_deployment(self, deployment_id: str, operator: str, reason: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            deployment = self.store.get_deployment(deployment_id)
+            if not deployment:
+                raise NotFoundError(f"deployment not found: {deployment_id}")
+            deployment_history = self.store.list_deployments(limit=200)
+            rollback_commands = []
+            touched_workloads = []
+            for item in deployment["command_results"]:
+                workload = self._require_workload(item["workload_id"])
+                previous_images = [
+                    command_item.get("image")
+                    for previous in deployment_history
+                    for command_item in previous.get("command_results", [])
+                    if previous["id"] != deployment_id
+                    and previous.get("status") == "success"
+                    and command_item.get("workload_id") == workload["id"]
+                    and command_item.get("image")
+                ]
+                target_image = previous_images[0] if previous_images else workload["image"]
+                results = self.adapter.deploy_image(workload, target_image)
+                rollback_commands.append({"workload_id": workload["id"], "image": target_image, "commands": results})
+                touched_workloads.append(workload["id"])
+                self.store.update_workload(
+                    workload["id"],
+                    {
+                        "image": target_image,
+                        "version": _version_from_image(target_image) or workload["version"],
+                        "status": "running" if _commands_ok(results) else "degraded",
+                        "metrics_source": self.adapter.name,
+                    },
+                )
+            rollback = {
+                "id": self.store.next_rollback_id(),
+                "deployment_id": deployment_id,
+                "operator": operator,
+                "reason": reason,
+                "from_version": deployment["version"],
+                "to_version": None,
+                "workloads": touched_workloads,
+                "command_results": rollback_commands,
+                "created_at": now_iso(),
+            }
+            self.store.insert_rollback_record(rollback)
+            self.store.insert_log("WARN", self.adapter.name, f"{operator} rolled back deployment {deployment_id} as {rollback['id']}", deployment["region"] if deployment["region"] != "all" else None, None, operator)
+            return rollback
 
     def scale_workload(self, workload_id: str, replicas: int, operator: str = "ops-user") -> dict[str, Any]:
         with self._lock:
@@ -404,6 +595,9 @@ class GameOpsEngine:
             workloads = self.store.list_workloads()
             alerts = self.store.list_alerts()
             deployments = self.store.list_deployments(limit=200)
+            approvals_pending = len(self.store.list_deployment_approvals(status="pending"))
+            rollbacks_total = len(self.store.list_rollbacks(limit=200))
+            mysql_metrics = self.store.mysql_pool_metrics()
             host = overview["host"]
             lines = [
                 "# HELP gameops_host_cpu_percent Host CPU usage percent.",
@@ -439,6 +633,30 @@ class GameOpsEngine:
                 counts[alert["severity"]] = counts.get(alert["severity"], 0) + 1
             lines.extend(
                 [
+                    "# HELP gameops_mysql_pool_in_use MySQL connections currently borrowed from the application pool.",
+                    "# TYPE gameops_mysql_pool_in_use gauge",
+                    f"gameops_mysql_pool_in_use {mysql_metrics['pool_in_use']}",
+                    "# HELP gameops_mysql_pool_idle MySQL idle connections retained in the application pool.",
+                    "# TYPE gameops_mysql_pool_idle gauge",
+                    f"gameops_mysql_pool_idle {mysql_metrics['pool_idle']}",
+                    "# HELP gameops_mysql_connections_created_total MySQL connections created by the application pool.",
+                    "# TYPE gameops_mysql_connections_created_total counter",
+                    f"gameops_mysql_connections_created_total {mysql_metrics['connections_created_total']}",
+                    "# HELP gameops_mysql_pool_overflow_total MySQL borrows above configured pool size.",
+                    "# TYPE gameops_mysql_pool_overflow_total counter",
+                    f"gameops_mysql_pool_overflow_total {mysql_metrics['pool_overflow_total']}",
+                    "# HELP gameops_mysql_slow_queries_total Application database operations slower than configured threshold.",
+                    "# TYPE gameops_mysql_slow_queries_total counter",
+                    f"gameops_mysql_slow_queries_total {mysql_metrics['slow_queries_total']}",
+                    "# HELP gameops_mysql_managed Whether GameOps is configured for managed MySQL.",
+                    "# TYPE gameops_mysql_managed gauge",
+                    f"gameops_mysql_managed {1 if mysql_metrics['managed'] else 0}",
+                    "# HELP gameops_deployment_approvals_pending Deployment approvals waiting for a human decision.",
+                    "# TYPE gameops_deployment_approvals_pending gauge",
+                    f"gameops_deployment_approvals_pending {approvals_pending}",
+                    "# HELP gameops_rollbacks_total Rollback records retained by GameOps.",
+                    "# TYPE gameops_rollbacks_total counter",
+                    f"gameops_rollbacks_total {rollbacks_total}",
                     "# HELP gameops_alerts_active Active alerts by severity.",
                     "# TYPE gameops_alerts_active gauge",
                     *[
@@ -590,6 +808,12 @@ class GameOpsEngine:
         if not region:
             raise NotFoundError(f"战区不存在: {region_id}")
         return region
+
+    def _require_approval(self, approval_id: str) -> dict[str, Any]:
+        approval = self.store.get_deployment_approval(approval_id)
+        if not approval:
+            raise NotFoundError(f"deployment approval not found: {approval_id}")
+        return approval
 
     @staticmethod
     def _public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -758,3 +982,96 @@ def _escape_label(value: Any) -> str:
 
 def _status_value(status: str) -> int:
     return {"running": 1, "degraded": 0, "maintenance": -1}.get(status, 0)
+
+
+def _decode_oidc_token(id_token: str) -> dict[str, Any]:
+    jwks_url = os.environ.get("GAMEOPS_OIDC_JWKS_URL", "")
+    expected_issuer = os.environ.get("GAMEOPS_OIDC_ISSUER", "")
+    expected_audience = os.environ.get("GAMEOPS_OIDC_CLIENT_ID", "")
+    if jwks_url:
+        try:
+            import jwt
+
+            signing_key = jwt.PyJWKClient(jwks_url).get_signing_key_from_jwt(id_token)
+            options = {"verify_aud": bool(expected_audience)}
+            claims = jwt.decode(
+                id_token,
+                signing_key.key,
+                algorithms=["RS256", "ES256"],
+                audience=expected_audience or None,
+                issuer=expected_issuer or None,
+                options=options,
+            )
+        except Exception as exc:
+            raise AuthenticationError("OIDC token signature validation failed") from exc
+        if not isinstance(claims, dict):
+            raise AuthenticationError("OIDC token payload is invalid")
+        return claims
+
+    allow_unsigned = os.environ.get("GAMEOPS_OIDC_ALLOW_UNSIGNED_DEV_TOKENS", "").lower() in {"1", "true", "yes"}
+    if not allow_unsigned:
+        raise AuthenticationError("OIDC JWKS URL is required")
+    parts = id_token.split(".")
+    if len(parts) < 2:
+        raise AuthenticationError("OIDC token must be a JWT")
+    try:
+        payload = parts[1]
+        padding = "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode((payload + padding).encode("ascii"))
+        claims = json.loads(decoded.decode("utf-8"))
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise AuthenticationError("OIDC token payload is invalid") from exc
+    if not isinstance(claims, dict):
+        raise AuthenticationError("OIDC token payload is invalid")
+    return claims
+
+
+def _oidc_role(claims: dict[str, Any]) -> str:
+    values: set[str] = set()
+    for key in ("groups", "roles", "role"):
+        value = claims.get(key)
+        if isinstance(value, str):
+            values.add(value)
+        elif isinstance(value, list):
+            values.update(str(item) for item in value)
+
+    admin_group = os.environ.get("GAMEOPS_OIDC_ADMIN_GROUP", "gameops-admins")
+    release_group = os.environ.get("GAMEOPS_OIDC_RELEASE_GROUP", "gameops-release")
+    if admin_group in values:
+        return "admin"
+    if release_group in values:
+        return "release_manager"
+    return "observer"
+
+
+def _in_change_window(window: str | None) -> bool:
+    if not window:
+        return True
+    now_value = datetime.now().time().replace(second=0, microsecond=0)
+    for item in re.split(r"[;,]", window):
+        item = item.strip()
+        if not item:
+            continue
+        if "-" not in item:
+            raise ValidationError("change window must use HH:MM-HH:MM")
+        start_text, end_text = [part.strip() for part in item.split("-", 1)]
+        start = _parse_hhmm(start_text)
+        end = _parse_hhmm(end_text)
+        if start <= end and start <= now_value <= end:
+            return True
+        if start > end and (now_value >= start or now_value <= end):
+            return True
+    return False
+
+
+def _parse_hhmm(value: str) -> time:
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except ValueError as exc:
+        raise ValidationError("change window must use HH:MM-HH:MM") from exc
+    return parsed.time()
+
+
+def _version_from_image(image: str) -> str | None:
+    tag = image.rsplit(":", 1)[-1] if ":" in image.rsplit("/", 1)[-1] else ""
+    return tag if VERSION_PATTERN.match(tag) else None

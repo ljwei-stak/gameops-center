@@ -69,6 +69,12 @@ class GameOpsHandler(BaseHTTPRequestHandler):
             elif path == "/api/deployments":
                 self._require("read")
                 self._json(ENGINE.list_deployments())
+            elif path == "/api/deploy/approvals":
+                self._require("read")
+                self._json(ENGINE.list_deployment_approvals(status=_query_first(query, "status")))
+            elif path == "/api/rollbacks":
+                self._require("read")
+                self._json(ENGINE.list_rollbacks())
             elif path == "/api/ai/diagnosis":
                 self._require("ai")
                 self._json(ENGINE.diagnose())
@@ -100,6 +106,10 @@ class GameOpsHandler(BaseHTTPRequestHandler):
                 self._json(ENGINE.login(payload.get("username", ""), payload.get("password", "")))
                 return
 
+            if path == "/api/sso/login":
+                self._json(ENGINE.sso_login(payload.get("id_token", "")))
+                return
+
             if path == "/api/alertmanager":
                 self._json(ENGINE.receive_alertmanager(payload), HTTPStatus.ACCEPTED)
                 return
@@ -119,6 +129,38 @@ class GameOpsHandler(BaseHTTPRequestHandler):
                     strategy=payload.get("strategy", "canary"),
                     operator=payload.get("operator") or user["username"],
                     image=payload.get("image") or None,
+                    reason=payload.get("reason") or None,
+                    change_window=payload.get("change_window") or None,
+                )
+                self._json(result, HTTPStatus.CREATED)
+                return
+
+            approve_match = re.match(r"^/api/deploy/approvals/([^/]+)/approve$", path)
+            if approve_match:
+                user = self._require("approve_deploy")
+                result = ENGINE.approve_deployment(
+                    approve_match.group(1),
+                    user["username"],
+                    approved=bool(payload.get("approved", True)),
+                    reason=payload.get("reason") or None,
+                )
+                self._json(result)
+                return
+
+            execute_match = re.match(r"^/api/deploy/approvals/([^/]+)/execute$", path)
+            if execute_match:
+                user = self._require("execute_deploy")
+                result = ENGINE.execute_deployment(execute_match.group(1), payload.get("operator") or user["username"])
+                self._json(result, HTTPStatus.CREATED)
+                return
+
+            rollback_match = re.match(r"^/api/deployments/([^/]+)/rollback$", path)
+            if rollback_match:
+                user = self._require("rollback")
+                result = ENGINE.rollback_deployment(
+                    rollback_match.group(1),
+                    payload.get("operator") or user["username"],
+                    payload.get("reason") or None,
                 )
                 self._json(result, HTTPStatus.CREATED)
                 return

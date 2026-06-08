@@ -1,5 +1,8 @@
 from copy import deepcopy
+import base64
+from datetime import datetime, timedelta
 import json
+import os
 import unittest
 
 from gameops.adapters import CompositeAdapter
@@ -48,6 +51,8 @@ class InMemoryStore:
         self.logs = []
         self.alert_rows = []
         self.deployments = []
+        self.approvals = []
+        self.rollbacks = []
         self.history = []
         for item in INITIAL_LOGS:
             self.insert_log(
@@ -138,8 +143,63 @@ class InMemoryStore:
     def list_deployments(self, limit=50):
         return deepcopy(self.deployments[:limit])
 
+    def get_deployment(self, deployment_id):
+        return deepcopy(next((item for item in self.deployments if item["id"] == deployment_id), None))
+
     def next_deployment_id(self):
         return f"DEP-{2401 + len(self.deployments)}"
+
+    def insert_deployment_approval(self, approval):
+        item = deepcopy(approval)
+        item.setdefault("approved_by", None)
+        item.setdefault("approved_at", None)
+        item.setdefault("executed_at", None)
+        item.setdefault("rejection_reason", None)
+        item.setdefault("deployment_id", None)
+        self.approvals.insert(0, item)
+        return deepcopy(item)
+
+    def update_deployment_approval(self, approval_id, changes):
+        for index, item in enumerate(self.approvals):
+            if item["id"] == approval_id:
+                item.update(deepcopy(changes))
+                self.approvals[index] = item
+                return deepcopy(item)
+        return None
+
+    def get_deployment_approval(self, approval_id):
+        return deepcopy(next((item for item in self.approvals if item["id"] == approval_id), None))
+
+    def list_deployment_approvals(self, status=None, limit=80):
+        rows = self.approvals
+        if status and status != "all":
+            rows = [item for item in rows if item["status"] == status]
+        return deepcopy(rows[:limit])
+
+    def next_approval_id(self):
+        return f"APR-{2401 + len(self.approvals)}"
+
+    def insert_rollback_record(self, rollback):
+        self.rollbacks.insert(0, deepcopy(rollback))
+        return deepcopy(rollback)
+
+    def list_rollbacks(self, limit=50):
+        return deepcopy(self.rollbacks[:limit])
+
+    def next_rollback_id(self):
+        return f"RBK-{2401 + len(self.rollbacks)}"
+
+    def mysql_pool_metrics(self):
+        return {
+            "pool_size": 5,
+            "pool_in_use": 0,
+            "pool_idle": 1,
+            "connections_created_total": 1,
+            "pool_overflow_total": 0,
+            "slow_queries_total": 0,
+            "slow_query_seconds": 1.0,
+            "managed": True,
+        }
 
     def record_metric_history(self, item):
         self.history.append({"id": len(self.history) + 1, **deepcopy(item)})
@@ -158,6 +218,21 @@ class InMemoryStore:
 
     def get_user(self, username):
         return deepcopy(self.users.get(username))
+
+    def upsert_sso_user(self, username, display_name, role):
+        user = self.users.get(username, {})
+        user.update(
+            {
+                "username": username,
+                "display_name": display_name,
+                "role": role,
+                "password_hash": user.get("password_hash", ""),
+                "salt": user.get("salt", ""),
+                "created_at": user.get("created_at", now_iso()),
+            }
+        )
+        self.users[username] = user
+        return deepcopy(user)
 
     def list_users(self):
         rows = []
@@ -233,12 +308,18 @@ class GameOpsEngineTest(unittest.TestCase):
         self.assertEqual(overview["host"]["cpu_percent"], 12.5)
 
     def test_canary_deploy_switches_image_version_and_records_release(self):
-        deployment = self.engine.deploy(
+        approval = self.engine.deploy(
             region="cn-east",
             version="v1.9.0",
             strategy="canary",
             operator="tester",
         )
+        self.assertEqual(approval["status"], "pending")
+        self.assertEqual(approval["version"], "v1.9.0")
+
+        approved = self.engine.approve_deployment(approval["id"], "admin")
+        self.assertEqual(approved["status"], "approved")
+        deployment = self.engine.execute_deployment(approval["id"], "tester")
 
         self.assertEqual(deployment["status"], "success")
         self.assertEqual(deployment["target_count"], 1)
@@ -247,6 +328,71 @@ class GameOpsEngineTest(unittest.TestCase):
         self.assertEqual(updated[0]["version"], "v1.9.0")
         self.assertIn(":v1.9.0", updated[0]["image"])
         self.assertEqual(len(self.engine.list_deployments()), 1)
+        self.assertEqual(self.engine.list_deployment_approvals()[0]["status"], "executed")
+
+    def test_release_manager_cannot_approve_deployments(self):
+        user = self.engine.login("release", "release123")["user"]
+        self.assertIn("execute_deploy", user["permissions"])
+        self.assertNotIn("approve_deploy", user["permissions"])
+        with self.assertRaises(AuthorizationError):
+            self.engine.require(user, "approve_deploy")
+
+    def test_change_window_blocks_execution_outside_window(self):
+        approval = self.engine.deploy(
+            region="cn-east",
+            version="v1.9.1",
+            strategy="canary",
+            operator="tester",
+            change_window=_future_window(),
+        )
+        self.engine.approve_deployment(approval["id"], "admin")
+        with self.assertRaises(ValidationError):
+            self.engine.execute_deployment(approval["id"], "tester")
+
+    def test_sso_login_maps_oidc_groups_to_role(self):
+        previous_issuer = os.environ.get("GAMEOPS_OIDC_ISSUER")
+        previous_audience = os.environ.get("GAMEOPS_OIDC_CLIENT_ID")
+        previous_allow_unsigned = os.environ.get("GAMEOPS_OIDC_ALLOW_UNSIGNED_DEV_TOKENS")
+        os.environ["GAMEOPS_OIDC_ISSUER"] = "https://sso.example.com"
+        os.environ["GAMEOPS_OIDC_CLIENT_ID"] = "gameops-center"
+        os.environ["GAMEOPS_OIDC_ALLOW_UNSIGNED_DEV_TOKENS"] = "true"
+        try:
+            token = _unsigned_jwt(
+                {
+                    "iss": "https://sso.example.com",
+                    "aud": "gameops-center",
+                    "preferred_username": "sre@example.com",
+                    "name": "SRE Owner",
+                    "groups": ["gameops-admins"],
+                }
+            )
+            session = self.engine.sso_login(token)
+        finally:
+            _restore_env("GAMEOPS_OIDC_ISSUER", previous_issuer)
+            _restore_env("GAMEOPS_OIDC_CLIENT_ID", previous_audience)
+            _restore_env("GAMEOPS_OIDC_ALLOW_UNSIGNED_DEV_TOKENS", previous_allow_unsigned)
+
+        self.assertEqual(session["user"]["username"], "sre@example.com")
+        self.assertEqual(session["user"]["role"], "admin")
+        with self.assertRaises(AuthenticationError):
+            self.engine.login("sre@example.com", "anything")
+
+    def test_rollback_records_restore_previous_image(self):
+        first = self.engine.deploy("cn-east", "v1.9.0", "canary", operator="tester")
+        self.engine.approve_deployment(first["id"], "admin")
+        first_deployment = self.engine.execute_deployment(first["id"], "tester")
+
+        second = self.engine.deploy("cn-east", "v1.9.1", "canary", operator="tester")
+        self.engine.approve_deployment(second["id"], "admin")
+        second_deployment = self.engine.execute_deployment(second["id"], "tester")
+
+        rollback = self.engine.rollback_deployment(second_deployment["id"], "admin", "bad canary")
+        updated = self.engine.list_workloads(region="cn-east")[0]
+
+        self.assertEqual(rollback["from_version"], "v1.9.1")
+        self.assertEqual(updated["version"], "v1.9.0")
+        self.assertEqual(updated["image"], first_deployment["command_results"][0]["image"])
+        self.assertEqual(self.engine.list_rollbacks()[0]["id"], rollback["id"])
 
     def test_invalid_version_is_rejected(self):
         with self.assertRaises(ValidationError):
@@ -286,6 +432,9 @@ class GameOpsEngineTest(unittest.TestCase):
         self.assertIn("gameops_host_cpu_percent 12.5", metrics)
         self.assertIn("gameops_workload_cpu_percent", metrics)
         self.assertIn("gameops_deployments_total", metrics)
+        self.assertIn("gameops_mysql_pool_idle", metrics)
+        self.assertIn("gameops_deployment_approvals_pending", metrics)
+        self.assertIn("gameops_rollbacks_total", metrics)
 
     def test_alertmanager_webhook_is_logged_and_forwarded(self):
         result = self.engine.receive_alertmanager(
@@ -327,6 +476,34 @@ class GameOpsEngineTest(unittest.TestCase):
         salt, password_hash = hash_password("secret")
         self.assertTrue(verify_password("secret", salt, password_hash))
         self.assertFalse(verify_password("wrong", salt, password_hash))
+
+
+def _unsigned_jwt(claims):
+    header = {"alg": "none", "typ": "JWT"}
+    return ".".join(
+        [
+            _b64url(json.dumps(header).encode("utf-8")),
+            _b64url(json.dumps(claims).encode("utf-8")),
+            "",
+        ]
+    )
+
+
+def _b64url(raw):
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _restore_env(name, value):
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+
+
+def _future_window():
+    start = datetime.now() + timedelta(hours=2)
+    end = start + timedelta(minutes=1)
+    return f"{start:%H:%M}-{end:%H:%M}"
 
 
 if __name__ == "__main__":

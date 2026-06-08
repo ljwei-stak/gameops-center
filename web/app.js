@@ -14,12 +14,16 @@ const els = {
   loginForm: document.querySelector("#loginForm"),
   loginUsername: document.querySelector("#loginUsername"),
   loginPassword: document.querySelector("#loginPassword"),
+  ssoToken: document.querySelector("#ssoToken"),
+  ssoLoginBtn: document.querySelector("#ssoLoginBtn"),
   metrics: document.querySelector("#metricsGrid"),
   regions: document.querySelector("#regionFilters"),
   regionCards: document.querySelector("#regionCards"),
   workloadRows: document.querySelector("#workloadRows"),
   alertList: document.querySelector("#alertList"),
   deploymentList: document.querySelector("#deploymentList"),
+  approvalList: document.querySelector("#approvalList"),
+  rollbackList: document.querySelector("#rollbackList"),
   logConsole: document.querySelector("#logConsole"),
   deployRegion: document.querySelector("#deployRegion"),
   deployStrategy: document.querySelector("#deployStrategy"),
@@ -116,12 +120,14 @@ async function loadAll() {
   try {
     const query = new URLSearchParams({ region: state.region, status: state.status });
     const logQuery = new URLSearchParams({ level: state.logLevel, limit: "100" });
-    const [overview, workloads, alerts, logs, deployments, cmdb] = await Promise.all([
+    const [overview, workloads, alerts, logs, deployments, approvals, rollbacks, cmdb] = await Promise.all([
       api("/api/overview"),
       api(`/api/workloads?${query}`),
       api("/api/alerts"),
       api(`/api/logs?${logQuery}`),
       api("/api/deployments"),
+      api("/api/deploy/approvals"),
+      api("/api/rollbacks"),
       api("/api/cmdb"),
     ]);
     state.regions = overview.regions;
@@ -132,6 +138,8 @@ async function loadAll() {
     renderWorkloads(workloads);
     renderAlerts(alerts);
     renderDeployments(deployments);
+    renderApprovals(approvals);
+    renderRollbacks(rollbacks);
     renderLogs(logs);
     renderDeployRegionOptions();
     renderCmdb(cmdb);
@@ -368,6 +376,75 @@ function renderDeployments(deployments) {
     .join("");
 }
 
+function renderApprovals(approvals) {
+  if (!els.approvalList) return;
+  if (!approvals.length) {
+    els.approvalList.innerHTML = `<div class="empty">No release approvals</div>`;
+    return;
+  }
+  els.approvalList.innerHTML = approvals
+    .slice(0, 12)
+    .map(
+      (approval) => `
+        <article class="approval-item">
+          <div class="deployment-main">
+            <div>
+              <strong>${approval.id} - ${approval.version}</strong>
+              <span>${approval.strategy} - ${approval.region} - ${approval.requested_by}</span>
+            </div>
+            <span class="deploy-status ${approval.status}">${approval.status}</span>
+          </div>
+          <div class="empty">${approval.change_window || "unrestricted"} - ${approval.reason || "no reason"}</div>
+          <div class="row-actions">
+            ${
+              approval.status === "pending" && has("approve_deploy")
+                ? `<button class="button small" data-action="approve" data-id="${approval.id}" title="Approve release">
+                    <i data-lucide="check"></i><span>Approve</span>
+                  </button>
+                  <button class="button small" data-action="reject" data-id="${approval.id}" title="Reject release">
+                    <i data-lucide="x"></i><span>Reject</span>
+                  </button>`
+                : ""
+            }
+            ${
+              approval.status === "approved" && has("execute_deploy")
+                ? `<button class="button small" data-action="execute" data-id="${approval.id}" title="Execute release">
+                    <i data-lucide="play"></i><span>Execute</span>
+                  </button>`
+                : ""
+            }
+          </div>
+        </article>
+      `
+    )
+    .join("");
+}
+
+function renderRollbacks(rollbacks) {
+  if (!els.rollbackList) return;
+  if (!rollbacks.length) {
+    els.rollbackList.innerHTML = `<div class="empty">No rollback records</div>`;
+    return;
+  }
+  els.rollbackList.innerHTML = rollbacks
+    .slice(0, 6)
+    .map(
+      (rollback) => `
+        <article class="deployment-item compact">
+          <div class="deployment-main">
+            <div>
+              <strong>${rollback.id} - ${rollback.deployment_id}</strong>
+              <span>${rollback.from_version || "-"} -> ${rollback.to_version || "previous image"}</span>
+            </div>
+            <span>${rollback.operator}</span>
+          </div>
+          <div class="empty">${normalizeTime(rollback.created_at)} - ${rollback.reason || "no reason"}</div>
+        </article>
+      `
+    )
+    .join("");
+}
+
 function renderLogs(logs) {
   if (!logs.length) {
     els.logConsole.innerHTML = `<div class="empty">暂无日志</div>`;
@@ -515,6 +592,13 @@ function syncPermissionState() {
   setDisabled(els.workloadRows.querySelectorAll("[data-action='restart']"), !canRestart);
   setDisabled(els.workloadRows.querySelectorAll("[data-action='scale']"), !canScale);
   setDisabled(els.regionCards.querySelectorAll("[data-action='traffic']"), !canTraffic);
+  if (els.approvalList) {
+    setDisabled(els.approvalList.querySelectorAll("[data-action='approve'], [data-action='reject']"), !has("approve_deploy"));
+    setDisabled(els.approvalList.querySelectorAll("[data-action='execute']"), !has("execute_deploy"));
+  }
+  if (els.deploymentList) {
+    setDisabled(els.deploymentList.querySelectorAll("[data-action='rollback']"), !has("rollback"));
+  }
   els.notifyBtn.disabled = !canNotify;
   els.diagnoseBtn.disabled = !canAi;
   els.reportBtn.disabled = !canAi;
@@ -537,6 +621,21 @@ function setupEvents() {
           username: els.loginUsername.value.trim(),
           password: els.loginPassword.value,
         }),
+      });
+      state.token = result.token;
+      state.user = result.user;
+      localStorage.setItem("gameops_token", result.token);
+      showApp();
+      await loadAll();
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+  els.ssoLoginBtn?.addEventListener("click", async () => {
+    try {
+      const result = await api("/api/sso/login", {
+        method: "POST",
+        body: JSON.stringify({ id_token: els.ssoToken.value.trim() }),
       });
       state.token = result.token;
       state.user = result.user;
@@ -632,6 +731,33 @@ function setupEvents() {
       });
       showToast(`${deployment.id} 发布完成`);
     });
+  });
+  els.approvalList?.addEventListener("click", async (event) => {
+    const approve = event.target.closest("[data-action='approve']");
+    const reject = event.target.closest("[data-action='reject']");
+    const execute = event.target.closest("[data-action='execute']");
+    if (approve || reject) {
+      const target = approve || reject;
+      await performAction(async () => {
+        await api(`/api/deploy/approvals/${target.dataset.id}/approve`, {
+          method: "POST",
+          body: JSON.stringify({
+            approved: Boolean(approve),
+            reason: reject ? "Rejected from GameOps UI" : "",
+          }),
+        });
+        showToast(approve ? "Release approved" : "Release rejected");
+      });
+    }
+    if (execute) {
+      await performAction(async () => {
+        await api(`/api/deploy/approvals/${execute.dataset.id}/execute`, {
+          method: "POST",
+          body: JSON.stringify({ operator: state.user.username }),
+        });
+        showToast("Release execution started");
+      });
+    }
   });
   els.notifyBtn.addEventListener("click", async () => {
     await performAction(async () => {
